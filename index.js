@@ -51,7 +51,7 @@ const key = (g, u) => `${g}:${u}`;
 const data = (g, u) => { const k = key(g, u); if (!stats.has(k)) stats.set(k, { messages: 0, warns: [], reputation: 0, voiceSeconds: 0, joins: [] }); return stats.get(k); };
 const server = guild => {
   if (!settings.has(guild.id)) settings.set(guild.id, {
-    welcome: { enabled: false, channelId: '', message: 'Bienvenue {user} sur **{server}** ! Tu es le membre #{memberCount}.', goodbye: 'Au revoir {user}.' },
+    welcome: { enabled: false, channelId: '', title: '🎉 Un nouveau membre !', message: 'Bienvenue {user} sur **{server}** ! Tu es le membre #{memberCount}.', goodbye: 'Au revoir {user}.', image: '' },
     logsChannelId: '', logEvents: ['messages', 'moderation', 'server', 'members'], antiRaid: false, antiSpam: false, antiLinks: false, antiMentions: false, antiCaps: false, antiEmoji: false, antiBots: false, blockedWords: [], autoRoleId: '',
     ticketCategoryId: '', tempVoiceHubId: '', tempVoiceCategoryId: '', selfRoleIds: []
   });
@@ -226,7 +226,11 @@ client.on('guildMemberAdd', async member => {
   }
   if (s.autoRoleId) await member.roles.add(s.autoRoleId, 'Autorôle Helpy').catch(() => {});
   const channel = member.guild.channels.cache.get(s.welcome.channelId);
-  if (s.welcome.enabled && channel?.isTextBased()) await channel.send({ content: formatTemplate(s.welcome.message, member.guild, member), allowedMentions: { users: [member.id] } }).catch(() => {});
+  if (s.welcome.enabled && channel?.isTextBased()) {
+    const embed = new EmbedBuilder().setColor(color).setTitle(formatTemplate(s.welcome.title, member.guild, member)).setDescription(formatTemplate(s.welcome.message, member.guild, member)).setThumbnail(member.user.displayAvatarURL({ size: 256 })).setFooter({ text: `Membre #${member.guild.memberCount} • ${config.botName}` }).setTimestamp();
+    if (s.welcome.image && /^https?:\/\//i.test(s.welcome.image)) embed.setImage(s.welcome.image);
+    await channel.send({ embeds: [embed], allowedMentions: { users: [member.id] } }).catch(() => {});
+  }
   await sendLog(member.guild, new EmbedBuilder().setTitle('📥 Arrivée').setDescription(`${member} a rejoint le serveur.`));
 });
 client.on('guildMemberRemove', async member => {
@@ -290,7 +294,7 @@ async function renderPage(i, page) {
   if (page === 'mod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [modEmbed()], components: [...nav(i, page), targetMenu(i, 'mod')] }); }
   if (page === 'logs') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('📜 Logs', 'Helpy envoie les actions importantes dans le salon configuré.', [{ name: 'Salon actuel', value: s.logsChannelId ? `<#${s.logsChannelId}>` : 'Non défini' }, { name: 'Événements', value: 'Messages, modération, salons, rôles, arrivées/départs et pseudos.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:logs`).setLabel('Choisir le salon').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:logevents`).setLabel('Catégories').setStyle(ButtonStyle.Secondary))] }); }
   if (page === 'tickets') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [moduleEmbed('🎫 Tickets', 'Publie un panneau dans le salon actuel. Les utilisateurs peuvent ouvrir un ticket privé.', [{ name: 'Fonctions', value: 'Ouverture, fermeture, catégories et journalisation.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:tickets`).setLabel('Créer un panneau').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:tickettools`).setLabel('Gérer ce ticket').setStyle(ButtonStyle.Secondary))] }); }
-  if (page === 'automod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('🤖 AutoMod', 'Protection automatique configurable.', [{ name: 'État', value: `Anti-raid : **${s.antiRaid ? 'ON' : 'OFF'}**\nAnti-spam : **${s.antiSpam ? 'ON' : 'OFF'}**\nMots filtrés : **${s.blockedWords.length}**` }, { name: 'Protections', value: 'Spam, liens, pubs, insultes, mass-mentions, caps, emojis et ghost pings.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:automod`).setLabel('Configurer').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:words`).setLabel('Mots interdits').setStyle(ButtonStyle.Secondary))] }); }
+  if (page === 'automod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('🤖 AutoMod', 'Protection automatique configurable.', [{ name: 'État', value: `Anti-raid : **${s.antiRaid ? 'ON' : 'OFF'}**\nAnti-spam : **${s.antiSpam ? 'ON' : 'OFF'}**\nMots filtrés : **${s.blockedWords.length}**` }, { name: 'Protections', value: 'Spam, liens, pubs, insultes, mass-mentions, caps, emojis et ghost pings.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:automod`).setLabel('Configurer').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:words`).setLabel('Mots interdits').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:toggleRaid`).setLabel(`Anti-raid ${s.antiRaid ? 'ON' : 'OFF'}`).setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:automodstatus`).setLabel('Vérifier').setStyle(ButtonStyle.Primary))] }); }
   if (page === 'giveaways') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [moduleEmbed('🎉 Giveaways', 'Crée un giveaway interactif dans le salon actuel.', [{ name: 'Actions', value: 'Créer, terminer et tirer un nouveau gagnant.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:giveaway`).setLabel('Créer un giveaway').setStyle(ButtonStyle.Primary))] }); }
   if (page === 'roles') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('🎭 Rôles', 'Autorôles et panneau de rôles libre-service.', [{ name: 'Autorôle', value: s.autoRoleId ? `<@&${s.autoRoleId}>` : 'Non configuré' }, { name: 'Rôles libre-service', value: String(s.selfRoleIds.length) }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:roles`).setLabel('Configurer les rôles').setStyle(ButtonStyle.Primary))] }); }
   if (page === 'welcome') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('👋 Bienvenue', 'Messages d’arrivée et de départ personnalisés.', [{ name: 'État', value: s.welcome.enabled ? 'Activé' : 'Désactivé' }, { name: 'Variables', value: '`{user}`, `{server}`, `{memberCount}`' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:welcome`).setLabel('Configurer').setStyle(ButtonStyle.Primary))] }); }
@@ -311,8 +315,8 @@ function chooseChannel(i, action, title, kind, allowNone = false) {
 async function channelConfig(i, action, channelId) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const s = server(i.guild), channel = channelId === 'none' ? null : i.guild.channels.cache.get(channelId);
-  if (action === 'welcome') return i.showModal(modal(`dash:${i.user.id}:modal:welcome:0`, 'Bienvenue et au revoir', [
-    { id: 'channel', label: 'Salon sélectionné', value: channel.id }, { id: 'welcome', label: 'Message de bienvenue', style: TextInputStyle.Paragraph, value: s.welcome.message }, { id: 'goodbye', label: 'Message d’au revoir', style: TextInputStyle.Paragraph, value: s.welcome.goodbye }, { id: 'enabled', label: 'Activer ? (oui / non)', value: s.welcome.enabled ? 'oui' : 'non' }
+  if (action === 'welcome') return i.showModal(modal(`dash:${i.user.id}:modal:welcome:${channel.id}`, 'Bienvenue et au revoir', [
+    { id: 'title', label: 'Titre', value: s.welcome.title }, { id: 'welcome', label: 'Message de bienvenue', style: TextInputStyle.Paragraph, value: s.welcome.message }, { id: 'goodbye', label: 'Message d’au revoir', style: TextInputStyle.Paragraph, value: s.welcome.goodbye }, { id: 'image', label: 'Lien de l’image (facultatif)', value: s.welcome.image, required: false }, { id: 'enabled', label: 'Activer ? (oui / non)', value: s.welcome.enabled ? 'oui' : 'non' }
   ]));
   if (action === 'logs') { s.logsChannelId = channel.id; await saveServerState(i.guild); return i.update({ embeds: [moduleEmbed('📜 Logs', `Les logs seront envoyés dans ${channel}.`)], components: [back(i, 'manage')] }); }
   if (action === 'voice') { s.tempVoiceHubId = channel.id; s.tempVoiceCategoryId = channel.parentId || ''; await saveServerState(i.guild); return i.update({ embeds: [moduleEmbed('🔊 Vocaux temporaires', `Le salon ${channel} créera un vocal temporaire.`)], components: [back(i, 'manage')] }); }
@@ -334,10 +338,11 @@ async function settingAction(i, action) {
   if (action === 'logs-old') return i.showModal(modal(`dash:${i.user.id}:modal:logs:0`, 'Salon de logs', [{ id: 'channel', label: 'ID du salon (vide pour désactiver)', value: s.logsChannelId, required: false }]));
   if (action === 'logevents') return i.showModal(modal(`dash:${i.user.id}:modal:logevents:0`, 'Catégories de logs', [{ id: 'events', label: 'Catégories séparées par ,', style: TextInputStyle.Paragraph, value: s.logEvents.join(', '), placeholder: 'messages, moderation, server, members' }]));
   if (action === 'security') return renderPage(i, 'security');
-  if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
+  if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; await saveServerState(i.guild); return renderPage(i, 'automod'); }
   if (action === 'toggleSpam') { s.antiSpam = !s.antiSpam; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
   if (action === 'words') return i.showModal(modal(`dash:${i.user.id}:modal:words:0`, 'Mots interdits', [{ id: 'words', label: 'Mots séparés par des virgules', style: TextInputStyle.Paragraph, value: s.blockedWords.join(', '), required: false }]));
   if (action === 'automod') return i.showModal(modal(`dash:${i.user.id}:modal:automod:0`, 'Réglages AutoMod', [{ id: 'spam', label: 'Anti-spam (oui/non)', value: s.antiSpam ? 'oui' : 'non' }, { id: 'links', label: 'Anti-liens et pub (oui/non)', value: s.antiLinks ? 'oui' : 'non' }, { id: 'mentions', label: 'Anti mass-mentions (oui/non)', value: s.antiMentions ? 'oui' : 'non' }, { id: 'caps', label: 'Anti-caps (oui/non)', value: s.antiCaps ? 'oui' : 'non' }, { id: 'emoji', label: 'Anti emoji-spam (oui/non)', value: s.antiEmoji ? 'oui' : 'non' }]));
+  if (action === 'automodstatus') { const me = i.guild.members.me; const permissions = me.permissions; const missing = [['ManageMessages', 'Gérer les messages'], ['ModerateMembers', 'Exclure temporairement des membres'], ['ViewChannel', 'Voir les salons']].filter(([p]) => !permissions.has(PermissionsBitField.Flags[p])).map(([, label]) => label); return i.reply({ content: missing.length ? `⚠️ Permissions manquantes : ${missing.join(', ')}.` : `${config.emojis.success} Helpy a les permissions nécessaires. Vérifie aussi que les protections sont sur « oui » et que l’intent Message Content est activé dans Discord Developer Portal.`, ephemeral: true }); }
   if (action === 'roles') return i.showModal(modal(`dash:${i.user.id}:modal:roles:0`, 'Autorôles et rôles libre-service', [{ id: 'autorole', label: 'ID de l’autorôle (vide pour désactiver)', value: s.autoRoleId, required: false }, { id: 'selfroles', label: 'IDs des rôles libre-service (séparés par ,)', style: TextInputStyle.Paragraph, value: s.selfRoleIds.join(', '), required: false }]));
   if (action === 'engagement') return renderPage(i, 'engagement');
   if (action === 'tickettools') { if (!i.channel?.topic?.startsWith('helpy-ticket:')) throw new Error('Ouvre cette page depuis un salon ticket Helpy.'); return i.reply({ content: 'Gestion du ticket :', components: [oneRow(new ButtonBuilder().setCustomId('helpy:ticketRename').setLabel('Renommer').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('helpy:ticketTranscript').setLabel('Transcription').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('helpy:closeTicket').setLabel('Fermer').setStyle(ButtonStyle.Danger))], ephemeral: true }); }
@@ -382,7 +387,7 @@ async function runAction(i, action, targetId) {
 }
 async function handleModal(i, action, targetId) {
   if (['say', 'update', 'banall'].includes(action)) return handleCreatorModal(i, action);
-  if (['welcome', 'logs', 'logevents', 'words', 'automod', 'roles', 'voice', 'tickets', 'giveaway', 'poll', 'announcement'].includes(action)) return handleSettingModal(i, action);
+  if (['welcome', 'logs', 'logevents', 'words', 'automod', 'roles', 'voice', 'tickets', 'giveaway', 'poll', 'announcement'].includes(action)) return handleSettingModal(i, action, targetId);
   if (['nickname', 'voicemove'].includes(action)) return handleAdvancedModal(i, action, targetId);
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const reason = i.fields.fields.has('reason') ? i.fields.getTextInputValue('reason').trim() : '';
@@ -419,13 +424,14 @@ async function moveMemberToVoice(i, memberId, channelId) {
   await sendLog(i.guild, new EmbedBuilder().setTitle('🔊 Déplacement vocal').setDescription(`${target} déplacé vers ${channel} par ${i.user}.`));
   return i.update({ embeds: [new EmbedBuilder().setColor(color).setDescription(`${config.emojis.success} ${target} a été déplacé vers ${channel}.`)], components: [back(i, 'mod')] });
 }
-async function handleSettingModal(i, action) {
+async function handleSettingModal(i, action, targetId) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const s = server(i.guild), value = id => i.fields.getTextInputValue(id).trim();
   const validChannel = (id, kind) => !id || (i.guild.channels.cache.get(id) && (!kind || i.guild.channels.cache.get(id).type === kind));
   if (action === 'welcome') {
-    const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.');
-    s.welcome = { enabled: ['oui', 'yes', 'on', 'true'].includes(value('enabled').toLowerCase()), channelId: channel, message: value('welcome'), goodbye: value('goodbye') };
+    const channel = targetId !== '0' ? targetId : value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('Salon texte invalide.');
+    const field = id => i.fields.fields.has(id) ? value(id) : '';
+    s.welcome = { enabled: ['oui', 'yes', 'on', 'true'].includes(value('enabled').toLowerCase()), channelId: channel, title: field('title') || s.welcome.title, message: value('welcome'), goodbye: value('goodbye'), image: field('image') };
     await saveServerState(i.guild);
     return i.reply({ content: `${config.emojis.success} Messages d’accueil enregistrés.`, ephemeral: true });
   }
