@@ -11,20 +11,34 @@ if (!process.env.DISCORD_TOKEN) throw new Error('DISCORD_TOKEN est absent. Ajout
 if (!/^\d+$/.test(config.creatorId)) console.warn('config.creatorId doit être remplacé par un ID Discord numérique.');
 
 const client = new Client({
-  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildPresences],
+  intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildPresences, GatewayIntentBits.GuildVoiceStates],
   partials: [Partials.Channel, Partials.Message, Partials.GuildMember, Partials.User]
 });
 const command = new SlashCommandBuilder().setName('dashboard').setDescription('Ouvrir le dashboard Corex').toJSON();
 const stats = new Map(); // guildId:userId -> données de session ; une base de données est nécessaire pour les conserver après redémarrage.
 const locks = new Map(); // guildId:channelId -> anciennes permissions
+const settings = new Map(); // Configuration de session par serveur (remplacez par une base de données pour une persistance Railway).
+const recentMessages = new Map();
+const recentJoins = new Map();
+const giveaways = new Map();
 const color = config.color;
 const key = (g, u) => `${g}:${u}`;
 const data = (g, u) => { const k = key(g, u); if (!stats.has(k)) stats.set(k, { messages: 0, warns: [] }); return stats.get(k); };
+const server = guild => {
+  if (!settings.has(guild.id)) settings.set(guild.id, {
+    welcome: { enabled: false, channelId: '', message: 'Bienvenue {user} sur **{server}** ! Tu es le membre #{memberCount}.', goodbye: 'Au revoir {user}.' },
+    logsChannelId: '', antiRaid: false, antiSpam: false, blockedWords: [], autoRoleId: '',
+    ticketCategoryId: '', tempVoiceHubId: '', tempVoiceCategoryId: '', selfRoleIds: []
+  });
+  return settings.get(guild.id);
+};
 const isCreator = i => i.user.id === config.creatorId;
 const isAdmin = i => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 const canModerate = i => isAdmin(i) || isCreator(i);
 const stamp = d => `<t:${Math.floor(d.getTime() / 1000)}:F>`;
 const truncate = (s, n = 1000) => s.length > n ? `${s.slice(0, n - 1)}…` : s;
+const formatTemplate = (text, guild, member) => text.replaceAll('{user}', `<@${member.id}>`).replaceAll('{server}', guild.name).replaceAll('{memberCount}', String(guild.memberCount));
+async function sendLog(guild, embed) { const id = server(guild).logsChannelId, channel = id && guild.channels.cache.get(id); if (channel?.isTextBased()) await channel.send({ embeds: [embed.setColor(color).setTimestamp()] }).catch(() => {}); }
 
 function homeEmbed(guild, interaction) {
   const online = guild.members.cache.filter(m => !m.user.bot && m.presence?.status && m.presence.status !== 'offline').size;
@@ -48,6 +62,7 @@ function nav(interaction, page = 'home') {
     { label: 'Membres', value: 'members', emoji: config.emojis.members, default: page === 'members' },
   ];
   if (admin) options.push({ label: 'Modération', value: 'mod', emoji: config.emojis.moderation, default: page === 'mod' });
+  if (admin) options.push({ label: 'Gestion serveur', value: 'manage', emoji: '🧰', default: page === 'manage' });
   if (creator) options.push({ label: 'Creator', value: 'creator', emoji: config.emojis.creator, default: page === 'creator' });
   if (admin) options.push({ label: 'Paramètres', value: 'settings', emoji: config.emojis.settings, default: page === 'settings' });
   return [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${interaction.user.id}:nav`).setPlaceholder('Navigation').addOptions(options))];
@@ -74,6 +89,41 @@ function targetMenu(interaction, action = 'profile') {
 function modEmbed() { return new EmbedBuilder().setColor(color).setTitle('🛡️ Modération').setDescription('Choisissez d’abord un membre, puis sélectionnez une action. Les actions sont vérifiées à chaque clic.').addFields({ name: 'Outils', value: 'Ban · Kick · Timeout · Unmute · Warn · Unwarn · Sanctions · Rôles\nClear · Lock/Unlock · Slowmode' }); }
 function creatorEmbed() { return new EmbedBuilder().setColor(color).setTitle('👑 Creator').setDescription('Outils réservés au propriétaire du bot. Les actions destructrices exigent une confirmation.').addFields({ name: 'Fonctions', value: 'Say · Update · Ban All (confirmation) · Reconnecter le bot' }); }
 function settingsEmbed() { return new EmbedBuilder().setColor(color).setTitle('⚙️ Paramètres du serveur').setDescription(`Paramètres globaux configurés dans \`config.js\`.\nTimeout par défaut : **${config.defaults.timeoutMinutes} min**\nSlowmode par défaut : **${config.defaults.slowmodeSeconds} s**\nClear par défaut : **${config.defaults.clearLimit} messages**`); }
+function managementEmbed(guild) {
+  const s = server(guild);
+  return new EmbedBuilder().setColor(color).setTitle('🧰 Gestion du serveur — Helpy')
+    .setDescription('Configurez Helpy sans utiliser d’autres commandes Slash.')
+    .addFields(
+      { name: '👋 Accueil', value: `Bienvenue : ${s.welcome.enabled ? 'activé' : 'désactivé'}\nSalon logs : ${s.logsChannelId ? `<#${s.logsChannelId}>` : 'non défini'}`, inline: true },
+      { name: '🛡️ Sécurité', value: `Anti-raid : ${s.antiRaid ? 'activé' : 'désactivé'}\nAnti-spam : ${s.antiSpam ? 'activé' : 'désactivé'}\nMots filtrés : ${s.blockedWords.length}`, inline: true },
+      { name: '✨ Automatisations', value: `Autorôle : ${s.autoRoleId ? `<@&${s.autoRoleId}>` : 'non défini'}\nTickets : ${s.ticketCategoryId ? 'configurés' : 'non configurés'}\nVocal temporaire : ${s.tempVoiceHubId ? 'configuré' : 'non configuré'}`, inline: true }
+    ).setFooter({ text: 'Les réglages sont en mémoire durant cette session Railway.' });
+}
+function managementRows(i) { return [
+  new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:welcome`).setLabel('Bienvenue / Au revoir').setEmoji('👋').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:logs`).setLabel('Salon logs').setEmoji('📜').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:security`).setLabel('Sécurité').setEmoji('🛡️').setStyle(ButtonStyle.Danger)),
+  new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:roles`).setLabel('Autorôles').setEmoji('🎭').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:engagement`).setLabel('Communauté').setEmoji('✨').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:voice`).setLabel('Vocaux temporaires').setEmoji('🔊').setStyle(ButtonStyle.Secondary))
+]; }
+function securityEmbed(guild) { const s = server(guild); return new EmbedBuilder().setColor(color).setTitle('🛡️ Sécurité').setDescription(`Anti-raid : **${s.antiRaid ? 'activé' : 'désactivé'}**\nAnti-spam : **${s.antiSpam ? 'activé' : 'désactivé'}**\nMots bloqués : ${s.blockedWords.length ? s.blockedWords.map(x => `\`${x}\``).join(', ') : 'aucun'}`); }
+function securityRows(i) { return [new ActionRowBuilder().addComponents(
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:toggleRaid`).setLabel('Anti-raid').setStyle(ButtonStyle.Danger),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:toggleSpam`).setLabel('Anti-spam').setStyle(ButtonStyle.Danger),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:words`).setLabel('Mots interdits').setStyle(ButtonStyle.Secondary),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:manage`).setLabel('Retour').setStyle(ButtonStyle.Secondary)
+)]; }
+function engagementEmbed() { return new EmbedBuilder().setColor(color).setTitle('✨ Communauté').setDescription('Publiez dans le salon actuel : panneaux de tickets, giveaways, sondages et annonces. Le classement utilise les messages de cette session.'); }
+function engagementRows(i) { return [new ActionRowBuilder().addComponents(
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:tickets`).setLabel('Panneau tickets').setStyle(ButtonStyle.Primary),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:giveaway`).setLabel('Giveaway').setStyle(ButtonStyle.Primary),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:poll`).setLabel('Sondage').setStyle(ButtonStyle.Secondary),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:announcement`).setLabel('Annonce').setStyle(ButtonStyle.Secondary),
+  new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:leaderboard`).setLabel('Classement').setStyle(ButtonStyle.Success)
+)]; }
 function modal(id, title, fields) { const m = new ModalBuilder().setCustomId(id).setTitle(title); fields.forEach(f => m.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(f.id).setLabel(f.label).setStyle(f.style || TextInputStyle.Short).setRequired(f.required !== false).setPlaceholder(f.placeholder || '').setValue(f.value || '')))); return m; }
 function owned(interaction) { const p = interaction.customId.split(':'); return p[0] === 'dash' && p[1] === interaction.user.id; }
 async function safeReply(interaction, payload) { return interaction.replied || interaction.deferred ? interaction.editReply(payload) : interaction.reply(payload); }
@@ -82,13 +132,52 @@ client.once('ready', async () => {
   console.log(`${config.botName} connecté en tant que ${client.user.tag}`);
   try { await client.application.commands.set([command]); console.log('Commande /dashboard enregistrée.'); } catch (e) { console.error('Impossible d’enregistrer la commande :', e.message); }
 });
-client.on('messageCreate', message => { if (!message.author.bot && message.guild) data(message.guild.id, message.author.id).messages++; });
+client.on('messageCreate', async message => {
+  if (message.author.bot || !message.guild) return;
+  const s = server(message.guild), memberData = data(message.guild.id, message.author.id);
+  memberData.messages++;
+  const now = Date.now(), messageKey = key(message.guild.id, message.author.id);
+  const history = (recentMessages.get(messageKey) || []).filter(t => now - t < config.defaults.antiSpamWindowSeconds * 1000);
+  history.push(now); recentMessages.set(messageKey, history);
+  const blocked = s.blockedWords.find(word => message.content.toLowerCase().includes(word.toLowerCase()));
+  if (blocked || (s.antiSpam && history.length > config.defaults.antiSpamMessages)) {
+    await message.delete().catch(() => {});
+    if (message.member?.moderatable) await message.member.timeout(60_000, blocked ? `Mot filtré : ${blocked}` : 'Anti-spam Helpy').catch(() => {});
+    await sendLog(message.guild, new EmbedBuilder().setTitle('🛡️ Auto-modération').setDescription(`${message.author} : ${blocked ? `mot filtré \`${blocked}\`` : 'spam détecté'}.`));
+  }
+});
+client.on('guildMemberAdd', async member => {
+  const s = server(member.guild), now = Date.now(), joins = (recentJoins.get(member.guild.id) || []).filter(t => now - t < config.defaults.antiRaidWindowSeconds * 1000);
+  joins.push(now); recentJoins.set(member.guild.id, joins);
+  if (s.antiRaid && joins.length >= config.defaults.antiRaidJoins) {
+    const everyone = member.guild.roles.everyone;
+    for (const channel of member.guild.channels.cache.values()) if (channel.isTextBased()) await channel.permissionOverwrites.edit(everyone, { SendMessages: false }, 'Anti-raid Helpy').catch(() => {});
+    await sendLog(member.guild, new EmbedBuilder().setColor(0xED4245).setTitle('🚨 Anti-raid déclenché').setDescription(`${joins.length} arrivées rapides : salons texte verrouillés.`));
+  }
+  if (s.autoRoleId) await member.roles.add(s.autoRoleId, 'Autorôle Helpy').catch(() => {});
+  const channel = member.guild.channels.cache.get(s.welcome.channelId);
+  if (s.welcome.enabled && channel?.isTextBased()) await channel.send({ content: formatTemplate(s.welcome.message, member.guild, member), allowedMentions: { users: [member.id] } }).catch(() => {});
+  await sendLog(member.guild, new EmbedBuilder().setTitle('📥 Arrivée').setDescription(`${member} a rejoint le serveur.`));
+});
+client.on('guildMemberRemove', async member => {
+  const s = server(member.guild), channel = member.guild.channels.cache.get(s.welcome.channelId);
+  if (s.welcome.enabled && channel?.isTextBased()) await channel.send({ content: formatTemplate(s.welcome.goodbye, member.guild, member), allowedMentions: { users: [member.id] } }).catch(() => {});
+  await sendLog(member.guild, new EmbedBuilder().setTitle('📤 Départ').setDescription(`${member.user.tag} a quitté le serveur.`));
+});
+client.on('voiceStateUpdate', async (oldState, newState) => {
+  const s = server(newState.guild);
+  if (newState.channelId !== s.tempVoiceHubId) return;
+  const category = s.tempVoiceCategoryId || newState.channel?.parentId;
+  const channel = await newState.guild.channels.create({ name: `🔊 ${newState.member.displayName}`, type: ChannelType.GuildVoice, parent: category || undefined, permissionOverwrites: [{ id: newState.member.id, allow: [PermissionsBitField.Flags.ManageChannels, PermissionsBitField.Flags.MoveMembers] }] }).catch(() => null);
+  if (channel) await newState.setChannel(channel, 'Vocal temporaire Helpy').catch(() => {});
+});
 client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === 'dashboard') {
       if (!interaction.inGuild()) return interaction.reply({ content: 'Cette commande est disponible uniquement sur un serveur.', ephemeral: true });
       return interaction.reply({ embeds: [homeEmbed(interaction.guild, interaction)], components: nav(interaction), ephemeral: true });
     }
+    if (interaction.customId?.startsWith('helpy:')) return handleHelpyInteraction(interaction);
     if (!interaction.customId?.startsWith('dash:') || !owned(interaction)) return;
     if (!interaction.inGuild()) return interaction.reply({ content: 'Action disponible uniquement sur un serveur.', ephemeral: true });
     const [, , type, ...args] = interaction.customId.split(':');
@@ -99,6 +188,7 @@ client.on('interactionCreate', async interaction => {
       return showTarget(interaction, args[0], interaction.values[0]);
     }
     if (type === 'action') return runAction(interaction, args[0], args[1]);
+    if (type === 'setting') return settingAction(interaction, args[0]);
     if (type === 'modal') return handleModal(interaction, args[0], args[1]);
     if (type === 'creator') return creatorAction(interaction, args[0]);
   } catch (error) {
@@ -113,8 +203,34 @@ async function renderPage(i, page) {
   if (page === 'profile') return i.update({ embeds: [memberEmbed(i.guild, i.member)], components: [...nav(i, page), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:members`).setLabel('Voir un autre profil').setStyle(ButtonStyle.Primary))] });
   if (page === 'members') return i.update({ embeds: [new EmbedBuilder().setColor(color).setTitle('👥 Membres').setDescription('Sélectionnez un membre pour consulter son profil.')], components: [...nav(i, page), targetMenu(i, 'profile')] });
   if (page === 'mod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [modEmbed()], components: [...nav(i, page), targetMenu(i, 'mod')] }); }
+  if (page === 'manage') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [managementEmbed(i.guild)], components: [...nav(i, page), ...managementRows(i)] }); }
+  if (page === 'security') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
+  if (page === 'engagement') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [engagementEmbed()], components: [...nav(i, 'manage'), ...engagementRows(i), back(i, 'manage')] }); }
   if (page === 'creator') { if (!isCreator(i)) throw new Error('Permission Creator requise.'); return i.update({ embeds: [creatorEmbed()], components: [...nav(i, page), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:say`).setLabel('Say').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:update`).setLabel('Update').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:banall`).setLabel('Ban All').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:reconnect`).setLabel('Reconnecter').setStyle(ButtonStyle.Secondary))] }); }
   if (page === 'settings') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [settingsEmbed()], components: nav(i, page) }); }
+}
+async function settingAction(i, action) {
+  if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
+  const s = server(i.guild);
+  if (action === 'welcome') return i.showModal(modal(`dash:${i.user.id}:modal:welcome:0`, 'Bienvenue et au revoir', [
+    { id: 'channel', label: 'ID du salon', value: s.welcome.channelId, placeholder: 'Clic droit salon → Copier l’identifiant' },
+    { id: 'welcome', label: 'Message de bienvenue', style: TextInputStyle.Paragraph, value: s.welcome.message },
+    { id: 'goodbye', label: 'Message d’au revoir', style: TextInputStyle.Paragraph, value: s.welcome.goodbye },
+    { id: 'enabled', label: 'Activer ? (oui / non)', value: s.welcome.enabled ? 'oui' : 'non' }
+  ]));
+  if (action === 'logs') return i.showModal(modal(`dash:${i.user.id}:modal:logs:0`, 'Salon de logs', [{ id: 'channel', label: 'ID du salon (vide pour désactiver)', value: s.logsChannelId, required: false }]));
+  if (action === 'security') return renderPage(i, 'security');
+  if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
+  if (action === 'toggleSpam') { s.antiSpam = !s.antiSpam; return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
+  if (action === 'words') return i.showModal(modal(`dash:${i.user.id}:modal:words:0`, 'Mots interdits', [{ id: 'words', label: 'Mots séparés par des virgules', style: TextInputStyle.Paragraph, value: s.blockedWords.join(', '), required: false }]));
+  if (action === 'roles') return i.showModal(modal(`dash:${i.user.id}:modal:roles:0`, 'Autorôles et rôles libre-service', [{ id: 'autorole', label: 'ID de l’autorôle (vide pour désactiver)', value: s.autoRoleId, required: false }, { id: 'selfroles', label: 'IDs des rôles libre-service (séparés par ,)', style: TextInputStyle.Paragraph, value: s.selfRoleIds.join(', '), required: false }]));
+  if (action === 'voice') return i.showModal(modal(`dash:${i.user.id}:modal:voice:0`, 'Vocaux temporaires', [{ id: 'hub', label: 'ID du vocal « créer un salon »', value: s.tempVoiceHubId, required: false }, { id: 'category', label: 'ID de la catégorie (facultatif)', value: s.tempVoiceCategoryId, required: false }]));
+  if (action === 'engagement') return renderPage(i, 'engagement');
+  if (action === 'tickets') return i.showModal(modal(`dash:${i.user.id}:modal:tickets:0`, 'Panneau de tickets', [{ id: 'category', label: 'ID de la catégorie des tickets (facultatif)', value: s.ticketCategoryId, required: false }, { id: 'text', label: 'Texte du panneau', style: TextInputStyle.Paragraph, value: 'Besoin d’aide ? Ouvre un ticket privé avec l’équipe.' }]));
+  if (action === 'giveaway') return i.showModal(modal(`dash:${i.user.id}:modal:giveaway:0`, 'Créer un giveaway', [{ id: 'prize', label: 'Prix' }, { id: 'seconds', label: 'Durée en secondes (10 à 604800)', value: '3600' }]));
+  if (action === 'poll') return i.showModal(modal(`dash:${i.user.id}:modal:poll:0`, 'Créer un sondage', [{ id: 'question', label: 'Question', style: TextInputStyle.Paragraph }, { id: 'options', label: 'Options, séparées par | (2 à 5)', placeholder: 'Option 1 | Option 2' }]));
+  if (action === 'announcement') return i.showModal(modal(`dash:${i.user.id}:modal:announcement:0`, 'Publier une annonce', [{ id: 'title', label: 'Titre' }, { id: 'text', label: 'Contenu', style: TextInputStyle.Paragraph }]));
+  if (action === 'leaderboard') { const top = [...stats.entries()].filter(([k]) => k.startsWith(`${i.guild.id}:`)).sort((a,b) => b[1].messages - a[1].messages).slice(0, 10); return i.reply({ embeds: [new EmbedBuilder().setColor(color).setTitle('🏆 Classement — session').setDescription(top.length ? top.map(([k, x], n) => `**${n + 1}.** <@${k.split(':')[1]}> — ${x.messages} messages`).join('\n') : 'Aucune activité pour le moment.')], ephemeral: true }); }
 }
 async function showTarget(i, mode, id) {
   const m = await i.guild.members.fetch(id);
@@ -131,16 +247,17 @@ async function runAction(i, action, targetId) {
   if (['ban','kick','timeout','warn','unwarn'].includes(action)) return i.showModal(modal(`dash:${i.user.id}:modal:${action}:${targetId}`, `${action.toUpperCase()} — ${target.user.tag}`, [{ id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, placeholder: 'Raison de la sanction' }, ...(action === 'timeout' ? [{ id: 'minutes', label: 'Durée (minutes, max 40320)', placeholder: String(config.defaults.timeoutMinutes) }] : [])]));
   if (action === 'clear') return i.showModal(modal(`dash:${i.user.id}:modal:clear:0`, 'Supprimer des messages', [{ id: 'amount', label: 'Nombre (1 à 100)', placeholder: String(config.defaults.clearLimit) }]));
   if (action === 'slowmode') return i.showModal(modal(`dash:${i.user.id}:modal:slowmode:0`, 'Configurer le slowmode', [{ id: 'seconds', label: 'Secondes (0 à 21600)', placeholder: String(config.defaults.slowmodeSeconds) }]));
-  if (action === 'unmute') { await target.timeout(null, `Unmute par ${i.user.tag}`); return i.reply({ content: `${config.emojis.success} Timeout retiré pour ${target}.`, ephemeral: true }); }
+  if (action === 'unmute') { await target.timeout(null, `Unmute par ${i.user.tag}`); await sendLog(i.guild, new EmbedBuilder().setTitle('🛡️ Unmute').setDescription(`${target} par ${i.user}.`)); return i.reply({ content: `${config.emojis.success} Timeout retiré pour ${target}.`, ephemeral: true }); }
   if (action === 'sanctions') { const w = data(i.guild.id, target.id).warns; return i.reply({ embeds: [new EmbedBuilder().setColor(color).setTitle(`Sanctions — ${target.user.tag}`).setDescription(w.length ? w.map((x,n) => `**${n + 1}.** ${x.reason}\nPar ${x.by} · ${stamp(new Date(x.at))}`).join('\n') : 'Aucune sanction en mémoire.')], ephemeral: true }); }
   if (action === 'roles') { const roles = i.guild.roles.cache.filter(r => r.editable && r.id !== i.guild.id).sort((a,b) => b.position - a.position).first(25); return i.reply({ content: 'Sélectionnez un rôle :', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${i.user.id}:target:role:${targetId}`).setPlaceholder('Ajouter ou retirer un rôle').addOptions(roles.map(r => ({ label: r.name, value: r.id }))))], ephemeral: true }); }
   if (action === 'lock' || action === 'unlock') { if (!i.channel?.isTextBased()) throw new Error('Salon texte requis.'); const everyone = i.guild.roles.everyone; if (action === 'lock') { locks.set(`${i.guild.id}:${i.channel.id}`, i.channel.permissionOverwrites.cache.get(everyone.id)?.allow?.bitfield?.toString() || ''); await i.channel.permissionOverwrites.edit(everyone, { SendMessages: false }, `Lock par ${i.user.tag}`); } else await i.channel.permissionOverwrites.edit(everyone, { SendMessages: null }, `Unlock par ${i.user.tag}`); return i.reply({ content: `${config.emojis.success} Salon ${action === 'lock' ? 'verrouillé' : 'déverrouillé'}.`, ephemeral: true }); }
 }
 async function handleModal(i, action, targetId) {
   if (['say', 'update', 'banall'].includes(action)) return handleCreatorModal(i, action);
+  if (['welcome', 'logs', 'words', 'roles', 'voice', 'tickets', 'giveaway', 'poll', 'announcement'].includes(action)) return handleSettingModal(i, action);
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const reason = i.fields.fields.has('reason') ? i.fields.getTextInputValue('reason').trim() : '';
-  if (action === 'clear') { const n = Number(i.fields.getTextInputValue('amount')); if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error('Entrez un nombre entre 1 et 100.'); const deleted = await i.channel.bulkDelete(n, true); return i.reply({ content: `${config.emojis.success} ${deleted.size} message(s) supprimé(s).`, ephemeral: true }); }
+  if (action === 'clear') { const n = Number(i.fields.getTextInputValue('amount')); if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error('Entrez un nombre entre 1 et 100.'); const deleted = await i.channel.bulkDelete(n, true); await sendLog(i.guild, new EmbedBuilder().setTitle('🧹 Clear').setDescription(`${deleted.size} message(s) supprimé(s) dans ${i.channel} par ${i.user}.`)); return i.reply({ content: `${config.emojis.success} ${deleted.size} message(s) supprimé(s).`, ephemeral: true }); }
   if (action === 'slowmode') { const n = Number(i.fields.getTextInputValue('seconds')); if (!Number.isInteger(n) || n < 0 || n > 21600) throw new Error('Entrez un nombre entre 0 et 21600.'); await i.channel.setRateLimitPerUser(n, `Slowmode par ${i.user.tag}`); return i.reply({ content: `${config.emojis.success} Slowmode réglé sur ${n}s.`, ephemeral: true }); }
   const t = await i.guild.members.fetch(targetId);
   if (t.id === i.user.id || t.id === i.guild.ownerId || t.roles.highest.position >= i.member.roles.highest.position) throw new Error('Vous ne pouvez pas modérer ce membre (hiérarchie Discord).');
@@ -149,7 +266,37 @@ async function handleModal(i, action, targetId) {
   if (action === 'timeout') { const min = Number(i.fields.getTextInputValue('minutes')); if (!Number.isInteger(min) || min < 1 || min > 40320) throw new Error('Durée invalide (1 à 40320 minutes).'); await t.timeout(min * 60_000, `${reason} | Par ${i.user.tag}`); }
   if (action === 'warn') data(i.guild.id, t.id).warns.push({ reason, by: i.user.tag, at: Date.now() });
   if (action === 'unwarn') { const w = data(i.guild.id, t.id).warns; if (!w.length) throw new Error('Aucun warn à retirer.'); w.pop(); }
+  await sendLog(i.guild, new EmbedBuilder().setTitle(`🛡️ ${action.toUpperCase()}`).setDescription(`Cible : ${t.user.tag}\nModérateur : ${i.user.tag}\nRaison : ${reason || 'Non précisée'}`));
   return i.reply({ content: `${config.emojis.success} Action **${action}** appliquée à ${t.user.tag}.`, ephemeral: true });
+}
+async function handleSettingModal(i, action) {
+  if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
+  const s = server(i.guild), value = id => i.fields.getTextInputValue(id).trim();
+  const validChannel = (id, kind) => !id || (i.guild.channels.cache.get(id) && (!kind || i.guild.channels.cache.get(id).type === kind));
+  if (action === 'welcome') {
+    const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.');
+    s.welcome = { enabled: ['oui', 'yes', 'on', 'true'].includes(value('enabled').toLowerCase()), channelId: channel, message: value('welcome'), goodbye: value('goodbye') };
+    return i.reply({ content: `${config.emojis.success} Messages d’accueil enregistrés.`, ephemeral: true });
+  }
+  if (action === 'logs') { const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.'); s.logsChannelId = channel; return i.reply({ content: `${config.emojis.success} Salon de logs ${channel ? 'enregistré' : 'désactivé'}.`, ephemeral: true }); }
+  if (action === 'words') { s.blockedWords = value('words').split(',').map(x => x.trim()).filter(Boolean).slice(0, 50); return i.reply({ content: `${config.emojis.success} ${s.blockedWords.length} mot(s) interdit(s) enregistré(s).`, ephemeral: true }); }
+  if (action === 'roles') {
+    const auto = value('autorole'), self = value('selfroles').split(',').map(x => x.trim()).filter(Boolean).slice(0, 25);
+    if ((auto && !i.guild.roles.cache.has(auto)) || self.some(id => !i.guild.roles.cache.has(id))) throw new Error('Un ID de rôle est invalide.');
+    s.autoRoleId = auto; s.selfRoleIds = self;
+    if (self.length && i.channel?.isTextBased()) await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎭 Rôles').setDescription('Choisissez vos rôles ci-dessous.')], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`helpy:selfroles:${i.guild.id}`).setPlaceholder('Ajouter ou retirer un rôle').setMinValues(0).setMaxValues(Math.min(self.length, 25)).addOptions(self.map(id => ({ label: i.guild.roles.cache.get(id).name, value: id }))))] });
+    return i.reply({ content: `${config.emojis.success} Rôles configurés${self.length ? ' et panneau publié' : ''}.`, ephemeral: true });
+  }
+  if (action === 'voice') { const hub = value('hub'), category = value('category'); if ((hub && i.guild.channels.cache.get(hub)?.type !== ChannelType.GuildVoice) || (category && i.guild.channels.cache.get(category)?.type !== ChannelType.GuildCategory)) throw new Error('IDs de vocal ou catégorie invalides.'); s.tempVoiceHubId = hub; s.tempVoiceCategoryId = category; return i.reply({ content: `${config.emojis.success} Vocaux temporaires configurés.`, ephemeral: true }); }
+  if (action === 'tickets') { const category = value('category'); if (category && i.guild.channels.cache.get(category)?.type !== ChannelType.GuildCategory) throw new Error('ID de catégorie invalide.'); s.ticketCategoryId = category; await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎫 Support Helpy').setDescription(value('text'))], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`helpy:ticket:${i.guild.id}`).setLabel('Ouvrir un ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary))] }); return i.reply({ content: `${config.emojis.success} Panneau de tickets publié.`, ephemeral: true }); }
+  if (action === 'giveaway') {
+    const seconds = Number(value('seconds')); if (!Number.isInteger(seconds) || seconds < 10 || seconds > 604800) throw new Error('Durée invalide (10 à 604800 secondes).');
+    const msg = await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎉 GIVEAWAY').setDescription(`Prix : **${value('prize')}**\nSe termine <t:${Math.floor((Date.now() + seconds * 1000) / 1000)}:R>\nClique pour participer.`)], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`helpy:giveaway:${i.guild.id}`).setLabel('Participer').setEmoji('🎉').setStyle(ButtonStyle.Success))] });
+    giveaways.set(msg.id, { users: new Set(), prize: value('prize'), guild: i.guild, channel: i.channel }); setTimeout(() => finishGiveaway(msg.id), seconds * 1000);
+    return i.reply({ content: `${config.emojis.success} Giveaway créé.`, ephemeral: true });
+  }
+  if (action === 'poll') { const options = value('options').split('|').map(x => x.trim()).filter(Boolean); if (options.length < 2 || options.length > 5) throw new Error('Entrez entre 2 et 5 options séparées par |.'); const pollId = `${Date.now()}`; await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('📊 Sondage').setDescription(value('question'))], components: options.map((o, n) => new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`helpy:poll:${pollId}:${n}`).setLabel(truncate(o, 80)).setStyle(ButtonStyle.Secondary))) }); return i.reply({ content: `${config.emojis.success} Sondage publié.`, ephemeral: true }); }
+  if (action === 'announcement') { await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle(value('title')).setDescription(value('text')).setFooter({ text: config.botName }).setTimestamp()], allowedMentions: { parse: [] } }); return i.reply({ content: `${config.emojis.success} Annonce publiée.`, ephemeral: true }); }
 }
 async function toggleRole(i, memberId, roleId) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
@@ -182,6 +329,44 @@ async function handleCreatorModal(i, action) {
     catch (error) { console.warn(`Ban All ignoré pour ${member.id}: ${error.message}`); }
   }
   return i.editReply(`${config.emojis.warning} Ban All terminé : ${count} membre(s) banni(s). Les membres protégés/non-bannables ont été ignorés.`);
+}
+async function handleHelpyInteraction(i) {
+  if (!i.inGuild()) return;
+  const [, action, ...args] = i.customId.split(':');
+  if (action === 'selfroles' && i.isStringSelectMenu()) {
+    const s = server(i.guild), selected = new Set(i.values), mine = i.member.roles.cache;
+    for (const id of s.selfRoleIds) {
+      const role = i.guild.roles.cache.get(id); if (!role?.editable) continue;
+      if (selected.has(id) && !mine.has(id)) await i.member.roles.add(role, 'Rôle libre-service Helpy').catch(() => {});
+      if (!selected.has(id) && mine.has(id)) await i.member.roles.remove(role, 'Rôle libre-service Helpy').catch(() => {});
+    }
+    return i.reply({ content: `${config.emojis.success} Vos rôles ont été mis à jour.`, ephemeral: true });
+  }
+  if (action === 'ticket' && i.isButton()) {
+    const s = server(i.guild), existing = i.guild.channels.cache.find(c => c.topic === `helpy-ticket:${i.user.id}`);
+    if (existing) return i.reply({ content: `Vous avez déjà un ticket ouvert : ${existing}`, ephemeral: true });
+    const channel = await i.guild.channels.create({ name: `ticket-${i.user.username}`.toLowerCase().replace(/[^a-z0-9-]/g, '').slice(0, 90) || `ticket-${i.user.id}`, type: ChannelType.GuildText, parent: s.ticketCategoryId || undefined, topic: `helpy-ticket:${i.user.id}`, permissionOverwrites: [{ id: i.guild.roles.everyone.id, deny: [PermissionsBitField.Flags.ViewChannel] }, { id: i.user.id, allow: [PermissionsBitField.Flags.ViewChannel, PermissionsBitField.Flags.SendMessages, PermissionsBitField.Flags.ReadMessageHistory] }] });
+    await channel.send({ content: `${i.user}`, embeds: [new EmbedBuilder().setColor(color).setTitle('🎫 Ticket ouvert').setDescription('Décrivez votre demande. Un membre de l’équipe vous répondra.')], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId('helpy:closeTicket').setLabel('Fermer le ticket').setStyle(ButtonStyle.Danger))] });
+    await sendLog(i.guild, new EmbedBuilder().setTitle('🎫 Ticket ouvert').setDescription(`${i.user} a ouvert ${channel}.`));
+    return i.reply({ content: `${config.emojis.success} Ticket créé : ${channel}`, ephemeral: true });
+  }
+  if (action === 'closeTicket' && i.isButton()) {
+    if (!i.channel?.topic?.startsWith('helpy-ticket:') || !(canModerate(i) || i.channel.topic === `helpy-ticket:${i.user.id}`)) return i.reply({ content: 'Vous ne pouvez pas fermer ce ticket.', ephemeral: true });
+    await i.reply({ content: 'Ticket fermé dans 5 secondes.' });
+    return setTimeout(() => i.channel.delete('Ticket fermé avec Helpy').catch(() => {}), 5000);
+  }
+  if (action === 'giveaway' && i.isButton()) {
+    const giveaway = giveaways.get(i.message.id); if (!giveaway) return i.reply({ content: 'Ce giveaway est terminé ou a redémarré.', ephemeral: true });
+    if (giveaway.users.has(i.user.id)) { giveaway.users.delete(i.user.id); return i.reply({ content: 'Participation retirée.', ephemeral: true }); }
+    giveaway.users.add(i.user.id); return i.reply({ content: `${config.emojis.success} Vous participez au giveaway !`, ephemeral: true });
+  }
+  if (action === 'poll' && i.isButton()) return i.reply({ content: `${config.emojis.success} Votre vote a été enregistré : **${i.component.label}**.`, ephemeral: true });
+}
+async function finishGiveaway(messageId) {
+  const giveaway = giveaways.get(messageId); if (!giveaway) return;
+  giveaways.delete(messageId);
+  const winnerId = [...giveaway.users][Math.floor(Math.random() * giveaway.users.size)];
+  await giveaway.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎉 Giveaway terminé').setDescription(winnerId ? `Prix : **${giveaway.prize}**\nGagnant : <@${winnerId}>` : `Prix : **${giveaway.prize}**\nAucun participant.`)] }).catch(() => {});
 }
 async function creatorAction(i, action) {
   if (!isCreator(i)) throw new Error('Permission Creator requise.');
