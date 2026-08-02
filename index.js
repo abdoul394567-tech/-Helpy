@@ -103,13 +103,6 @@ function nav(interaction, page = 'home') {
   ];
   if (admin) options.push(
     { label: 'Modération', value: 'mod', emoji: config.emojis.moderation, default: page === 'mod' },
-    { label: 'Logs', value: 'logs', emoji: '📜', default: page === 'logs' },
-    { label: 'Tickets', value: 'tickets', emoji: '🎫', default: page === 'tickets' },
-    { label: 'AutoMod', value: 'automod', emoji: '🤖', default: page === 'automod' },
-    { label: 'Giveaways', value: 'giveaways', emoji: '🎉', default: page === 'giveaways' },
-    { label: 'Rôles', value: 'roles', emoji: '🎭', default: page === 'roles' },
-    { label: 'Bienvenue', value: 'welcome', emoji: '👋', default: page === 'welcome' },
-    { label: 'Statistiques', value: 'statistics', emoji: '📊', default: page === 'statistics' },
     { label: 'Gestion serveur', value: 'manage', emoji: '🧰', default: page === 'manage' }
   );
   if (creator) options.push({ label: 'Creator', value: 'creator', emoji: config.emojis.creator, default: page === 'creator' });
@@ -151,13 +144,17 @@ function managementEmbed(guild) {
 }
 function managementRows(i) { return [
   new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:welcome`).setLabel('Bienvenue / Au revoir').setEmoji('👋').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:logs`).setLabel('Salon logs').setEmoji('📜').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:security`).setLabel('Sécurité').setEmoji('🛡️').setStyle(ButtonStyle.Danger)),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:welcome`).setLabel('Bienvenue').setEmoji('👋').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:logs`).setLabel('Logs').setEmoji('📜').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:automod`).setLabel('AutoMod').setEmoji('🤖').setStyle(ButtonStyle.Danger)),
   new ActionRowBuilder().addComponents(
-    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:roles`).setLabel('Autorôles').setEmoji('🎭').setStyle(ButtonStyle.Secondary),
-    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:engagement`).setLabel('Communauté').setEmoji('✨').setStyle(ButtonStyle.Primary),
-    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:voice`).setLabel('Vocaux temporaires').setEmoji('🔊').setStyle(ButtonStyle.Secondary))
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:tickets`).setLabel('Tickets').setEmoji('🎫').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:giveaways`).setLabel('Giveaways').setEmoji('🎉').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:roles`).setLabel('Rôles').setEmoji('🎭').setStyle(ButtonStyle.Secondary)),
+  new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:statistics`).setLabel('Statistiques').setEmoji('📊').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:voice`).setLabel('Vocaux temporaires').setEmoji('🔊').setStyle(ButtonStyle.Secondary),
+    new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:settings`).setLabel('Paramètres').setEmoji('⚙️').setStyle(ButtonStyle.Secondary))
 ]; }
 function securityEmbed(guild) { const s = server(guild); return new EmbedBuilder().setColor(color).setTitle('🛡️ Sécurité').setDescription(`Anti-raid : **${s.antiRaid ? 'activé' : 'désactivé'}**\nAnti-spam : **${s.antiSpam ? 'activé' : 'désactivé'}**\nMots bloqués : ${s.blockedWords.length ? s.blockedWords.map(x => `\`${x}\``).join(', ') : 'aucun'}`); }
 function securityRows(i) { return [new ActionRowBuilder().addComponents(
@@ -273,6 +270,8 @@ client.on('interactionCreate', async interaction => {
       return showTarget(interaction, args[0], interaction.values[0]);
     }
     if (type === 'advanced' && interaction.isStringSelectMenu()) return runAction(interaction, interaction.values[0], args[0]);
+    if (type === 'advancedmove' && interaction.isStringSelectMenu()) return moveMemberToVoice(interaction, args[0], interaction.values[0]);
+    if (type === 'channelconfig' && interaction.isStringSelectMenu()) return channelConfig(interaction, args[0], interaction.values[0]);
     if (type === 'action') return runAction(interaction, args[0], args[1]);
     if (type === 'setting') return settingAction(interaction, args[0]);
     if (type === 'modal') return handleModal(interaction, args[0], args[1]);
@@ -302,16 +301,37 @@ async function renderPage(i, page) {
   if (page === 'creator') { if (!isCreator(i)) throw new Error('Permission Creator requise.'); return i.update({ embeds: [creatorEmbed()], components: [...nav(i, page), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:say`).setLabel('Say').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:update`).setLabel('Update').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:banall`).setLabel('Ban All').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:creator:reconnect`).setLabel('Reconnecter').setStyle(ButtonStyle.Secondary))] }); }
   if (page === 'settings') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [settingsEmbed()], components: nav(i, page) }); }
 }
+function chooseChannel(i, action, title, kind, allowNone = false) {
+  let channels = i.guild.channels.cache.filter(channel => kind === 'text' ? channel.isTextBased() : kind === 'voice' ? channel.type === ChannelType.GuildVoice : channel.type === ChannelType.GuildCategory).first(25);
+  const options = channels.map(channel => ({ label: truncate(channel.name, 100), value: channel.id, emoji: kind === 'text' ? '💬' : kind === 'voice' ? '🔊' : '📁' }));
+  if (allowNone) options.unshift({ label: 'Aucune catégorie', value: 'none', emoji: '📂' });
+  if (!options.length) throw new Error('Aucun salon compatible trouvé.');
+  return i.update({ embeds: [new EmbedBuilder().setColor(color).setTitle(title).setDescription('Sélectionne simplement un élément dans la liste.')], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${i.user.id}:channelconfig:${action}`).setPlaceholder(title).addOptions(options)), back(i, 'manage')] });
+}
+async function channelConfig(i, action, channelId) {
+  if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
+  const s = server(i.guild), channel = channelId === 'none' ? null : i.guild.channels.cache.get(channelId);
+  if (action === 'welcome') return i.showModal(modal(`dash:${i.user.id}:modal:welcome:0`, 'Bienvenue et au revoir', [
+    { id: 'channel', label: 'Salon sélectionné', value: channel.id }, { id: 'welcome', label: 'Message de bienvenue', style: TextInputStyle.Paragraph, value: s.welcome.message }, { id: 'goodbye', label: 'Message d’au revoir', style: TextInputStyle.Paragraph, value: s.welcome.goodbye }, { id: 'enabled', label: 'Activer ? (oui / non)', value: s.welcome.enabled ? 'oui' : 'non' }
+  ]));
+  if (action === 'logs') { s.logsChannelId = channel.id; await saveServerState(i.guild); return i.update({ embeds: [moduleEmbed('📜 Logs', `Les logs seront envoyés dans ${channel}.`)], components: [back(i, 'manage')] }); }
+  if (action === 'voice') { s.tempVoiceHubId = channel.id; s.tempVoiceCategoryId = channel.parentId || ''; await saveServerState(i.guild); return i.update({ embeds: [moduleEmbed('🔊 Vocaux temporaires', `Le salon ${channel} créera un vocal temporaire.`)], components: [back(i, 'manage')] }); }
+  if (action === 'tickets') return i.showModal(modal(`dash:${i.user.id}:modal:tickets:0`, 'Panneau de tickets', [{ id: 'category', label: 'Catégorie sélectionnée', value: channel?.id || '', required: false }, { id: 'text', label: 'Texte du panneau', style: TextInputStyle.Paragraph, value: 'Besoin d’aide ? Ouvre un ticket privé avec l’équipe.' }]));
+}
 async function settingAction(i, action) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const s = server(i.guild);
-  if (action === 'welcome') return i.showModal(modal(`dash:${i.user.id}:modal:welcome:0`, 'Bienvenue et au revoir', [
+  if (action === 'welcome') return chooseChannel(i, 'welcome', 'Choisis le salon de bienvenue', 'text');
+  if (action === 'logs') return chooseChannel(i, 'logs', 'Choisis le salon qui recevra les logs', 'text');
+  if (action === 'voice') return chooseChannel(i, 'voice', 'Choisis le vocal « Créer un salon »', 'voice');
+  if (action === 'tickets') return chooseChannel(i, 'tickets', 'Choisis la catégorie des tickets', 'category', true);
+  if (action === 'welcome-old') return i.showModal(modal(`dash:${i.user.id}:modal:welcome:0`, 'Bienvenue et au revoir', [
     { id: 'channel', label: 'ID du salon', value: s.welcome.channelId, placeholder: 'Clic droit salon → Copier l’identifiant' },
     { id: 'welcome', label: 'Message de bienvenue', style: TextInputStyle.Paragraph, value: s.welcome.message },
     { id: 'goodbye', label: 'Message d’au revoir', style: TextInputStyle.Paragraph, value: s.welcome.goodbye },
     { id: 'enabled', label: 'Activer ? (oui / non)', value: s.welcome.enabled ? 'oui' : 'non' }
   ]));
-  if (action === 'logs') return i.showModal(modal(`dash:${i.user.id}:modal:logs:0`, 'Salon de logs', [{ id: 'channel', label: 'ID du salon (vide pour désactiver)', value: s.logsChannelId, required: false }]));
+  if (action === 'logs-old') return i.showModal(modal(`dash:${i.user.id}:modal:logs:0`, 'Salon de logs', [{ id: 'channel', label: 'ID du salon (vide pour désactiver)', value: s.logsChannelId, required: false }]));
   if (action === 'logevents') return i.showModal(modal(`dash:${i.user.id}:modal:logevents:0`, 'Catégories de logs', [{ id: 'events', label: 'Catégories séparées par ,', style: TextInputStyle.Paragraph, value: s.logEvents.join(', '), placeholder: 'messages, moderation, server, members' }]));
   if (action === 'security') return renderPage(i, 'security');
   if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
@@ -319,9 +339,7 @@ async function settingAction(i, action) {
   if (action === 'words') return i.showModal(modal(`dash:${i.user.id}:modal:words:0`, 'Mots interdits', [{ id: 'words', label: 'Mots séparés par des virgules', style: TextInputStyle.Paragraph, value: s.blockedWords.join(', '), required: false }]));
   if (action === 'automod') return i.showModal(modal(`dash:${i.user.id}:modal:automod:0`, 'Réglages AutoMod', [{ id: 'spam', label: 'Anti-spam (oui/non)', value: s.antiSpam ? 'oui' : 'non' }, { id: 'links', label: 'Anti-liens et pub (oui/non)', value: s.antiLinks ? 'oui' : 'non' }, { id: 'mentions', label: 'Anti mass-mentions (oui/non)', value: s.antiMentions ? 'oui' : 'non' }, { id: 'caps', label: 'Anti-caps (oui/non)', value: s.antiCaps ? 'oui' : 'non' }, { id: 'emoji', label: 'Anti emoji-spam (oui/non)', value: s.antiEmoji ? 'oui' : 'non' }]));
   if (action === 'roles') return i.showModal(modal(`dash:${i.user.id}:modal:roles:0`, 'Autorôles et rôles libre-service', [{ id: 'autorole', label: 'ID de l’autorôle (vide pour désactiver)', value: s.autoRoleId, required: false }, { id: 'selfroles', label: 'IDs des rôles libre-service (séparés par ,)', style: TextInputStyle.Paragraph, value: s.selfRoleIds.join(', '), required: false }]));
-  if (action === 'voice') return i.showModal(modal(`dash:${i.user.id}:modal:voice:0`, 'Vocaux temporaires', [{ id: 'hub', label: 'ID du vocal « créer un salon »', value: s.tempVoiceHubId, required: false }, { id: 'category', label: 'ID de la catégorie (facultatif)', value: s.tempVoiceCategoryId, required: false }]));
   if (action === 'engagement') return renderPage(i, 'engagement');
-  if (action === 'tickets') return i.showModal(modal(`dash:${i.user.id}:modal:tickets:0`, 'Panneau de tickets', [{ id: 'category', label: 'ID de la catégorie des tickets (facultatif)', value: s.ticketCategoryId, required: false }, { id: 'text', label: 'Texte du panneau', style: TextInputStyle.Paragraph, value: 'Besoin d’aide ? Ouvre un ticket privé avec l’équipe.' }]));
   if (action === 'tickettools') { if (!i.channel?.topic?.startsWith('helpy-ticket:')) throw new Error('Ouvre cette page depuis un salon ticket Helpy.'); return i.reply({ content: 'Gestion du ticket :', components: [oneRow(new ButtonBuilder().setCustomId('helpy:ticketRename').setLabel('Renommer').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('helpy:ticketTranscript').setLabel('Transcription').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('helpy:closeTicket').setLabel('Fermer').setStyle(ButtonStyle.Danger))], ephemeral: true }); }
   if (action === 'giveaway') return i.showModal(modal(`dash:${i.user.id}:modal:giveaway:0`, 'Créer un giveaway', [{ id: 'prize', label: 'Prix' }, { id: 'seconds', label: 'Durée en secondes (10 à 604800)', value: '3600' }]));
   if (action === 'poll') return i.showModal(modal(`dash:${i.user.id}:modal:poll:0`, 'Créer un sondage', [{ id: 'question', label: 'Question', style: TextInputStyle.Paragraph }, { id: 'options', label: 'Options, séparées par | (2 à 5)', placeholder: 'Option 1 | Option 2' }]));
@@ -345,7 +363,7 @@ async function runAction(i, action, targetId) {
   const target = targetId !== '0' ? await i.guild.members.fetch(targetId) : null;
   if (['ban','kick','timeout','warn','unwarn','softban'].includes(action)) return i.showModal(modal(`dash:${i.user.id}:modal:${action}:${targetId}`, `${action.toUpperCase()} — ${target.user.tag}`, [{ id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, placeholder: 'Raison de la sanction' }, ...(action === 'timeout' ? [{ id: 'minutes', label: 'Durée (minutes, max 40320)', placeholder: String(config.defaults.timeoutMinutes) }] : [])]));
   if (action === 'nickname') return i.showModal(modal(`dash:${i.user.id}:modal:nickname:${targetId}`, `Pseudo — ${target.user.tag}`, [{ id: 'nickname', label: 'Nouveau pseudo (vide pour retirer)', required: false, value: target.nickname || '' }, { id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, required: false }]));
-  if (action === 'voicemove') return i.showModal(modal(`dash:${i.user.id}:modal:voicemove:${targetId}`, `Déplacer ${target.user.tag}`, [{ id: 'channel', label: 'ID du salon vocal cible' }, { id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, required: false }]));
+  if (action === 'voicemove') { const choices = i.guild.channels.cache.filter(c => c.type === ChannelType.GuildVoice).first(25).map(c => ({ label: truncate(c.name, 100), value: c.id, emoji: '🔊' })); if (!choices.length) throw new Error('Aucun salon vocal trouvé.'); return i.update({ embeds: [new EmbedBuilder().setColor(color).setTitle('Déplacer un membre').setDescription(`Choisis le salon vocal pour ${target}.`)], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${i.user.id}:advancedmove:${target.id}`).setPlaceholder('Salon vocal cible').addOptions(choices)), back(i, 'mod')] }); }
   if (action === 'clear') return i.showModal(modal(`dash:${i.user.id}:modal:clear:0`, 'Supprimer des messages', [{ id: 'amount', label: 'Nombre (1 à 100)', placeholder: String(config.defaults.clearLimit) }]));
   if (action === 'slowmode') return i.showModal(modal(`dash:${i.user.id}:modal:slowmode:0`, 'Configurer le slowmode', [{ id: 'seconds', label: 'Secondes (0 à 21600)', placeholder: String(config.defaults.slowmodeSeconds) }]));
   if (action === 'unmute') { await target.timeout(null, `Unmute par ${i.user.tag}`); await sendLog(i.guild, new EmbedBuilder().setTitle('🛡️ Unmute').setDescription(`${target} par ${i.user}.`)); return i.reply({ content: `${config.emojis.success} Timeout retiré pour ${target}.`, ephemeral: true }); }
@@ -391,6 +409,15 @@ async function handleAdvancedModal(i, action, targetId) {
   if (action === 'voicemove') { const channel = i.guild.channels.cache.get(i.fields.getTextInputValue('channel').trim()); if (channel?.type !== ChannelType.GuildVoice) throw new Error('ID de salon vocal invalide.'); if (!target.voice.channel) throw new Error('Ce membre n’est pas en vocal.'); await target.voice.setChannel(channel, `${reason} | Par ${i.user.tag}`); }
   await sendLog(i.guild, new EmbedBuilder().setTitle(`🛡️ ${action}`).setDescription(`Cible : ${target}\nModérateur : ${i.user}\nRaison : ${reason}`));
   return i.reply({ content: `${config.emojis.success} Action appliquée à ${target}.`, ephemeral: true });
+}
+async function moveMemberToVoice(i, memberId, channelId) {
+  if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
+  const target = await i.guild.members.fetch(memberId), channel = i.guild.channels.cache.get(channelId);
+  if (!target.voice.channel || channel?.type !== ChannelType.GuildVoice) throw new Error('Membre ou salon vocal invalide.');
+  if (target.roles.highest.position >= i.member.roles.highest.position) throw new Error('Hiérarchie Discord insuffisante.');
+  await target.voice.setChannel(channel, `Déplacement par ${i.user.tag}`);
+  await sendLog(i.guild, new EmbedBuilder().setTitle('🔊 Déplacement vocal').setDescription(`${target} déplacé vers ${channel} par ${i.user}.`));
+  return i.update({ embeds: [new EmbedBuilder().setColor(color).setDescription(`${config.emojis.success} ${target} a été déplacé vers ${channel}.`)], components: [back(i, 'mod')] });
 }
 async function handleSettingModal(i, action) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
