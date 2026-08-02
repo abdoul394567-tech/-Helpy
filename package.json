@@ -1,0 +1,10 @@
+{
+  "name": "corex-dashboard-bot",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Bot Discord Corex avec dashboard interactif",
+  "main": "index.js",
+  "scripts": { "start": "node index.js" },
+  "engines": { "node": ">=20.0.0" },
+  "dependencies": { "discord.js": "^14.25.1", "dotenv": "^16.6.1" }
+}
