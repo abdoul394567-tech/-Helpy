@@ -189,6 +189,19 @@ client.on('messageCreate', async message => {
     await sendLog(message.guild, new EmbedBuilder().setTitle('🛡️ Auto-modération').setDescription(`${message.author} : ${blocked ? `mot filtré \`${blocked}\`` : 'spam détecté'}.`));
   }
 });
+client.on('messageDelete', async message => {
+  if (!message.guild || message.author?.bot) return;
+  await sendLog(message.guild, new EmbedBuilder().setTitle('🗑️ Message supprimé').setDescription(`Salon : ${message.channel}\nAuteur : ${message.author || 'Inconnu'}\nContenu : ${truncate(message.content || 'Non disponible', 900)}`));
+});
+client.on('messageUpdate', async (oldMessage, newMessage) => {
+  if (!newMessage.guild || newMessage.author?.bot || oldMessage.content === newMessage.content) return;
+  await sendLog(newMessage.guild, new EmbedBuilder().setTitle('✏️ Message modifié').setDescription(`Salon : ${newMessage.channel}\nAuteur : ${newMessage.author}\nAvant : ${truncate(oldMessage.content || 'Non disponible', 400)}\nAprès : ${truncate(newMessage.content || 'Non disponible', 400)}`));
+});
+client.on('channelCreate', channel => sendLog(channel.guild, new EmbedBuilder().setTitle('➕ Salon créé').setDescription(`${channel} (${channel.type})`)));
+client.on('channelDelete', channel => sendLog(channel.guild, new EmbedBuilder().setTitle('➖ Salon supprimé').setDescription(`${channel.name} (${channel.type})`)));
+client.on('roleCreate', role => sendLog(role.guild, new EmbedBuilder().setTitle('➕ Rôle créé').setDescription(`${role} (${role.id})`)));
+client.on('roleUpdate', (oldRole, role) => { if (oldRole.name !== role.name || oldRole.color !== role.color) return sendLog(role.guild, new EmbedBuilder().setTitle('✏️ Rôle modifié').setDescription(`${oldRole.name} → ${role.name}`)); });
+client.on('guildMemberUpdate', (oldMember, member) => { if (oldMember.nickname !== member.nickname) return sendLog(member.guild, new EmbedBuilder().setTitle('✏️ Pseudo modifié').setDescription(`${member.user} : \`${oldMember.nickname || oldMember.user.username}\` → \`${member.nickname || member.user.username}\``)); });
 client.on('guildMemberAdd', async member => {
   const s = server(member.guild), now = Date.now(), joins = (recentJoins.get(member.guild.id) || []).filter(t => now - t < config.defaults.antiRaidWindowSeconds * 1000);
   joins.push(now); recentJoins.set(member.guild.id, joins);
@@ -243,6 +256,7 @@ client.on('interactionCreate', async interaction => {
       if (args[0] === 'role') return toggleRole(interaction, args[1], interaction.values[0]);
       return showTarget(interaction, args[0], interaction.values[0]);
     }
+    if (type === 'advanced' && interaction.isStringSelectMenu()) return runAction(interaction, interaction.values[0], args[0]);
     if (type === 'action') return runAction(interaction, args[0], args[1]);
     if (type === 'setting') return settingAction(interaction, args[0]);
     if (type === 'modal') return handleModal(interaction, args[0], args[1]);
@@ -296,15 +310,28 @@ async function showTarget(i, mode, id) {
   const actions = [['ban','Ban',ButtonStyle.Danger],['kick','Kick',ButtonStyle.Danger],['timeout','Timeout',ButtonStyle.Secondary],['unmute','Unmute',ButtonStyle.Secondary],['warn','Warn',ButtonStyle.Secondary],['unwarn','Unwarn',ButtonStyle.Secondary],['sanctions','Sanctions',ButtonStyle.Primary],['roles','Rôles',ButtonStyle.Primary]];
   const row1 = new ActionRowBuilder().addComponents(actions.slice(0, 4).map(([a,l,s]) => new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:${a}:${id}`).setLabel(l).setStyle(s)));
   const row2 = new ActionRowBuilder().addComponents(actions.slice(4).map(([a,l,s]) => new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:${a}:${id}`).setLabel(l).setStyle(s)));
-  return i.update({ embeds: [memberEmbed(i.guild, m), new EmbedBuilder().setColor(color).setDescription(`Actions de modération pour ${m}.`)], components: [...nav(i, 'mod'), row1, row2, new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:clear:0`).setLabel('Clear salon').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:lock:0`).setLabel('Lock salon').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:unlock:0`).setLabel('Unlock salon').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:slowmode:0`).setLabel('Slowmode').setStyle(ButtonStyle.Primary))] });
+  return i.update({ embeds: [memberEmbed(i.guild, m), new EmbedBuilder().setColor(color).setDescription(`Actions de modération pour ${m}.`)], components: [...nav(i, 'mod'), row1, row2, new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${i.user.id}:advanced:${id}`).setPlaceholder('Outils avancés').addOptions(
+    { label: 'Changer le pseudo', value: 'nickname', emoji: '✏️' }, { label: 'Softban', value: 'softban', emoji: '🔨' }, { label: 'Mute vocal', value: 'voicemute', emoji: '🔇' }, { label: 'Deafen vocal', value: 'voicedeafen', emoji: '🎧' }, { label: 'Déplacer en vocal', value: 'voicemove', emoji: '↪️' }, { label: 'Expulser du vocal', value: 'voicekick', emoji: '🚪' }
+  )), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:clear:0`).setLabel('Clear salon').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:lock:0`).setLabel('Lock salon').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:unlock:0`).setLabel('Unlock salon').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:action:slowmode:0`).setLabel('Slowmode').setStyle(ButtonStyle.Primary))] });
 }
 async function runAction(i, action, targetId) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const target = targetId !== '0' ? await i.guild.members.fetch(targetId) : null;
-  if (['ban','kick','timeout','warn','unwarn'].includes(action)) return i.showModal(modal(`dash:${i.user.id}:modal:${action}:${targetId}`, `${action.toUpperCase()} — ${target.user.tag}`, [{ id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, placeholder: 'Raison de la sanction' }, ...(action === 'timeout' ? [{ id: 'minutes', label: 'Durée (minutes, max 40320)', placeholder: String(config.defaults.timeoutMinutes) }] : [])]));
+  if (['ban','kick','timeout','warn','unwarn','softban'].includes(action)) return i.showModal(modal(`dash:${i.user.id}:modal:${action}:${targetId}`, `${action.toUpperCase()} — ${target.user.tag}`, [{ id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, placeholder: 'Raison de la sanction' }, ...(action === 'timeout' ? [{ id: 'minutes', label: 'Durée (minutes, max 40320)', placeholder: String(config.defaults.timeoutMinutes) }] : [])]));
+  if (action === 'nickname') return i.showModal(modal(`dash:${i.user.id}:modal:nickname:${targetId}`, `Pseudo — ${target.user.tag}`, [{ id: 'nickname', label: 'Nouveau pseudo (vide pour retirer)', required: false, value: target.nickname || '' }, { id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, required: false }]));
+  if (action === 'voicemove') return i.showModal(modal(`dash:${i.user.id}:modal:voicemove:${targetId}`, `Déplacer ${target.user.tag}`, [{ id: 'channel', label: 'ID du salon vocal cible' }, { id: 'reason', label: 'Raison', style: TextInputStyle.Paragraph, required: false }]));
   if (action === 'clear') return i.showModal(modal(`dash:${i.user.id}:modal:clear:0`, 'Supprimer des messages', [{ id: 'amount', label: 'Nombre (1 à 100)', placeholder: String(config.defaults.clearLimit) }]));
   if (action === 'slowmode') return i.showModal(modal(`dash:${i.user.id}:modal:slowmode:0`, 'Configurer le slowmode', [{ id: 'seconds', label: 'Secondes (0 à 21600)', placeholder: String(config.defaults.slowmodeSeconds) }]));
   if (action === 'unmute') { await target.timeout(null, `Unmute par ${i.user.tag}`); await sendLog(i.guild, new EmbedBuilder().setTitle('🛡️ Unmute').setDescription(`${target} par ${i.user}.`)); return i.reply({ content: `${config.emojis.success} Timeout retiré pour ${target}.`, ephemeral: true }); }
+  if (['voicemute', 'voicedeafen', 'voicekick'].includes(action)) {
+    if (!target.voice.channel) throw new Error('Ce membre n’est pas en vocal.');
+    if (target.roles.highest.position >= i.member.roles.highest.position) throw new Error('Hiérarchie Discord insuffisante.');
+    if (action === 'voicemute') await target.voice.setMute(!target.voice.serverMute, `Action par ${i.user.tag}`);
+    if (action === 'voicedeafen') await target.voice.setDeaf(!target.voice.serverDeaf, `Action par ${i.user.tag}`);
+    if (action === 'voicekick') await target.voice.disconnect(`Expulsion vocale par ${i.user.tag}`);
+    await sendLog(i.guild, new EmbedBuilder().setTitle(`🔊 ${action}`).setDescription(`${target} par ${i.user}.`));
+    return i.reply({ content: `${config.emojis.success} Action vocale appliquée à ${target}.`, ephemeral: true });
+  }
   if (action === 'sanctions') { const w = data(i.guild.id, target.id).warns; return i.reply({ embeds: [new EmbedBuilder().setColor(color).setTitle(`Sanctions — ${target.user.tag}`).setDescription(w.length ? w.map((x,n) => `**${n + 1}.** ${x.reason}\nPar ${x.by} · ${stamp(new Date(x.at))}`).join('\n') : 'Aucune sanction en mémoire.')], ephemeral: true }); }
   if (action === 'roles') { const roles = i.guild.roles.cache.filter(r => r.editable && r.id !== i.guild.id).sort((a,b) => b.position - a.position).first(25); return i.reply({ content: 'Sélectionnez un rôle :', components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${i.user.id}:target:role:${targetId}`).setPlaceholder('Ajouter ou retirer un rôle').addOptions(roles.map(r => ({ label: r.name, value: r.id }))))], ephemeral: true }); }
   if (action === 'lock' || action === 'unlock') { if (!i.channel?.isTextBased()) throw new Error('Salon texte requis.'); const everyone = i.guild.roles.everyone; if (action === 'lock') { locks.set(`${i.guild.id}:${i.channel.id}`, i.channel.permissionOverwrites.cache.get(everyone.id)?.allow?.bitfield?.toString() || ''); await i.channel.permissionOverwrites.edit(everyone, { SendMessages: false }, `Lock par ${i.user.tag}`); } else await i.channel.permissionOverwrites.edit(everyone, { SendMessages: null }, `Unlock par ${i.user.tag}`); return i.reply({ content: `${config.emojis.success} Salon ${action === 'lock' ? 'verrouillé' : 'déverrouillé'}.`, ephemeral: true }); }
@@ -312,6 +339,7 @@ async function runAction(i, action, targetId) {
 async function handleModal(i, action, targetId) {
   if (['say', 'update', 'banall'].includes(action)) return handleCreatorModal(i, action);
   if (['welcome', 'logs', 'words', 'roles', 'voice', 'tickets', 'giveaway', 'poll', 'announcement'].includes(action)) return handleSettingModal(i, action);
+  if (['nickname', 'voicemove'].includes(action)) return handleAdvancedModal(i, action, targetId);
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const reason = i.fields.fields.has('reason') ? i.fields.getTextInputValue('reason').trim() : '';
   if (action === 'clear') { const n = Number(i.fields.getTextInputValue('amount')); if (!Number.isInteger(n) || n < 1 || n > 100) throw new Error('Entrez un nombre entre 1 et 100.'); const deleted = await i.channel.bulkDelete(n, true); await sendLog(i.guild, new EmbedBuilder().setTitle('🧹 Clear').setDescription(`${deleted.size} message(s) supprimé(s) dans ${i.channel} par ${i.user}.`)); return i.reply({ content: `${config.emojis.success} ${deleted.size} message(s) supprimé(s).`, ephemeral: true }); }
@@ -319,6 +347,7 @@ async function handleModal(i, action, targetId) {
   const t = await i.guild.members.fetch(targetId);
   if (t.id === i.user.id || t.id === i.guild.ownerId || t.roles.highest.position >= i.member.roles.highest.position) throw new Error('Vous ne pouvez pas modérer ce membre (hiérarchie Discord).');
   if (action === 'ban') await t.ban({ reason: `${reason} | Par ${i.user.tag}` });
+  if (action === 'softban') { await t.ban({ deleteMessageSeconds: 604800, reason: `${reason} | Softban par ${i.user.tag}` }); await i.guild.members.unban(t.id, `Fin du softban par ${i.user.tag}`); }
   if (action === 'kick') await t.kick(`${reason} | Par ${i.user.tag}`);
   if (action === 'timeout') { const min = Number(i.fields.getTextInputValue('minutes')); if (!Number.isInteger(min) || min < 1 || min > 40320) throw new Error('Durée invalide (1 à 40320 minutes).'); await t.timeout(min * 60_000, `${reason} | Par ${i.user.tag}`); }
   if (action === 'warn') data(i.guild.id, t.id).warns.push({ reason, by: i.user.tag, at: Date.now() });
@@ -326,6 +355,16 @@ async function handleModal(i, action, targetId) {
   await saveMemberState(i.guild.id, t.id);
   await sendLog(i.guild, new EmbedBuilder().setTitle(`🛡️ ${action.toUpperCase()}`).setDescription(`Cible : ${t.user.tag}\nModérateur : ${i.user.tag}\nRaison : ${reason || 'Non précisée'}`));
   return i.reply({ content: `${config.emojis.success} Action **${action}** appliquée à ${t.user.tag}.`, ephemeral: true });
+}
+async function handleAdvancedModal(i, action, targetId) {
+  if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
+  const target = await i.guild.members.fetch(targetId);
+  if (target.id === i.user.id || target.id === i.guild.ownerId || target.roles.highest.position >= i.member.roles.highest.position) throw new Error('Vous ne pouvez pas modérer ce membre (hiérarchie Discord).');
+  const reason = i.fields.getTextInputValue('reason').trim() || 'Non précisée';
+  if (action === 'nickname') { await target.setNickname(i.fields.getTextInputValue('nickname').trim() || null, `${reason} | Par ${i.user.tag}`); }
+  if (action === 'voicemove') { const channel = i.guild.channels.cache.get(i.fields.getTextInputValue('channel').trim()); if (channel?.type !== ChannelType.GuildVoice) throw new Error('ID de salon vocal invalide.'); if (!target.voice.channel) throw new Error('Ce membre n’est pas en vocal.'); await target.voice.setChannel(channel, `${reason} | Par ${i.user.tag}`); }
+  await sendLog(i.guild, new EmbedBuilder().setTitle(`🛡️ ${action}`).setDescription(`Cible : ${target}\nModérateur : ${i.user}\nRaison : ${reason}`));
+  return i.reply({ content: `${config.emojis.success} Action appliquée à ${target}.`, ephemeral: true });
 }
 async function handleSettingModal(i, action) {
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
