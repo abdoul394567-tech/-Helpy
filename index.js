@@ -52,7 +52,7 @@ const data = (g, u) => { const k = key(g, u); if (!stats.has(k)) stats.set(k, { 
 const server = guild => {
   if (!settings.has(guild.id)) settings.set(guild.id, {
     welcome: { enabled: false, channelId: '', message: 'Bienvenue {user} sur **{server}** ! Tu es le membre #{memberCount}.', goodbye: 'Au revoir {user}.' },
-    logsChannelId: '', antiRaid: false, antiSpam: false, blockedWords: [], autoRoleId: '',
+    logsChannelId: '', logEvents: ['messages', 'moderation', 'server', 'members'], antiRaid: false, antiSpam: false, antiLinks: false, antiMentions: false, antiCaps: false, antiEmoji: false, antiBots: false, blockedWords: [], autoRoleId: '',
     ticketCategoryId: '', tempVoiceHubId: '', tempVoiceCategoryId: '', selfRoleIds: []
   });
   return settings.get(guild.id);
@@ -101,8 +101,17 @@ function nav(interaction, page = 'home') {
     { label: 'Mon profil', value: 'profile', emoji: config.emojis.profile, default: page === 'profile' },
     { label: 'Membres', value: 'members', emoji: config.emojis.members, default: page === 'members' },
   ];
-  if (admin) options.push({ label: 'Modération', value: 'mod', emoji: config.emojis.moderation, default: page === 'mod' });
-  if (admin) options.push({ label: 'Gestion serveur', value: 'manage', emoji: '🧰', default: page === 'manage' });
+  if (admin) options.push(
+    { label: 'Modération', value: 'mod', emoji: config.emojis.moderation, default: page === 'mod' },
+    { label: 'Logs', value: 'logs', emoji: '📜', default: page === 'logs' },
+    { label: 'Tickets', value: 'tickets', emoji: '🎫', default: page === 'tickets' },
+    { label: 'AutoMod', value: 'automod', emoji: '🤖', default: page === 'automod' },
+    { label: 'Giveaways', value: 'giveaways', emoji: '🎉', default: page === 'giveaways' },
+    { label: 'Rôles', value: 'roles', emoji: '🎭', default: page === 'roles' },
+    { label: 'Bienvenue', value: 'welcome', emoji: '👋', default: page === 'welcome' },
+    { label: 'Statistiques', value: 'statistics', emoji: '📊', default: page === 'statistics' },
+    { label: 'Gestion serveur', value: 'manage', emoji: '🧰', default: page === 'manage' }
+  );
   if (creator) options.push({ label: 'Creator', value: 'creator', emoji: config.emojis.creator, default: page === 'creator' });
   if (admin) options.push({ label: 'Paramètres', value: 'settings', emoji: config.emojis.settings, default: page === 'settings' });
   return [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`dash:${interaction.user.id}:nav`).setPlaceholder('Navigation').addOptions(options))];
@@ -165,6 +174,8 @@ function engagementRows(i) { return [new ActionRowBuilder().addComponents(
   new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:announcement`).setLabel('Annonce').setStyle(ButtonStyle.Secondary),
   new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:leaderboard`).setLabel('Classement').setStyle(ButtonStyle.Success)
 )]; }
+function moduleEmbed(title, description, fields = []) { return new EmbedBuilder().setColor(color).setTitle(title).setDescription(description).addFields(fields); }
+function oneRow(...buttons) { return new ActionRowBuilder().addComponents(buttons); }
 function modal(id, title, fields) { const m = new ModalBuilder().setCustomId(id).setTitle(title); fields.forEach(f => m.addComponents(new ActionRowBuilder().addComponents(new TextInputBuilder().setCustomId(f.id).setLabel(f.label).setStyle(f.style || TextInputStyle.Short).setRequired(f.required !== false).setPlaceholder(f.placeholder || '').setValue(f.value || '')))); return m; }
 function owned(interaction) { const p = interaction.customId.split(':'); return p[0] === 'dash' && p[1] === interaction.user.id; }
 async function safeReply(interaction, payload) { return interaction.replied || interaction.deferred ? interaction.editReply(payload) : interaction.reply(payload); }
@@ -183,10 +194,15 @@ client.on('messageCreate', async message => {
   const history = (recentMessages.get(messageKey) || []).filter(t => now - t < config.defaults.antiSpamWindowSeconds * 1000);
   history.push(now); recentMessages.set(messageKey, history);
   const blocked = s.blockedWords.find(word => message.content.toLowerCase().includes(word.toLowerCase()));
-  if (blocked || (s.antiSpam && history.length > config.defaults.antiSpamMessages)) {
+  const hasLink = /https?:\/\/|discord\.gg\/|www\./i.test(message.content);
+  const letters = message.content.replace(/[^a-zà-ÿ]/gi, '');
+  const tooManyCaps = letters.length >= 12 && (letters.match(/[A-ZÀ-Ý]/g)?.length || 0) / letters.length > 0.75;
+  const emojiCount = (message.content.match(/[\p{Extended_Pictographic}]/gu) || []).length;
+  const violation = blocked ? `mot filtré : ${blocked}` : s.antiSpam && history.length > config.defaults.antiSpamMessages ? 'spam détecté' : s.antiLinks && hasLink ? 'lien ou publicité non autorisé' : s.antiMentions && message.mentions.users.size >= 5 ? 'mass mention détectée' : s.antiCaps && tooManyCaps ? 'excès de majuscules' : s.antiEmoji && emojiCount >= 8 ? 'emoji spam détecté' : '';
+  if (violation) {
     await message.delete().catch(() => {});
-    if (message.member?.moderatable) await message.member.timeout(60_000, blocked ? `Mot filtré : ${blocked}` : 'Anti-spam Helpy').catch(() => {});
-    await sendLog(message.guild, new EmbedBuilder().setTitle('🛡️ Auto-modération').setDescription(`${message.author} : ${blocked ? `mot filtré \`${blocked}\`` : 'spam détecté'}.`));
+    if (message.member?.moderatable) await message.member.timeout(60_000, `AutoMod Helpy : ${violation}`).catch(() => {});
+    await sendLog(message.guild, new EmbedBuilder().setTitle('🛡️ Auto-modération').setDescription(`${message.author} : ${violation}.`));
   }
 });
 client.on('messageDelete', async message => {
@@ -273,6 +289,13 @@ async function renderPage(i, page) {
   if (page === 'profile') { await loadMemberState(i.guild.id, i.user.id); return i.update({ embeds: [memberEmbed(i.guild, i.member)], components: [...nav(i, page), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:members`).setLabel('Voir un autre profil').setStyle(ButtonStyle.Primary))] }); }
   if (page === 'members') return i.update({ embeds: [new EmbedBuilder().setColor(color).setTitle('👥 Membres').setDescription('Sélectionnez un membre pour consulter son profil.')], components: [...nav(i, page), targetMenu(i, 'profile')] });
   if (page === 'mod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [modEmbed()], components: [...nav(i, page), targetMenu(i, 'mod')] }); }
+  if (page === 'logs') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('📜 Logs', 'Helpy envoie les actions importantes dans le salon configuré.', [{ name: 'Salon actuel', value: s.logsChannelId ? `<#${s.logsChannelId}>` : 'Non défini' }, { name: 'Événements', value: 'Messages, modération, salons, rôles, arrivées/départs et pseudos.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:logs`).setLabel('Choisir le salon').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:logevents`).setLabel('Catégories').setStyle(ButtonStyle.Secondary))] }); }
+  if (page === 'tickets') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [moduleEmbed('🎫 Tickets', 'Publie un panneau dans le salon actuel. Les utilisateurs peuvent ouvrir un ticket privé.', [{ name: 'Fonctions', value: 'Ouverture, fermeture, catégories et journalisation.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:tickets`).setLabel('Créer un panneau').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:tickettools`).setLabel('Gérer ce ticket').setStyle(ButtonStyle.Secondary))] }); }
+  if (page === 'automod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('🤖 AutoMod', 'Protection automatique configurable.', [{ name: 'État', value: `Anti-raid : **${s.antiRaid ? 'ON' : 'OFF'}**\nAnti-spam : **${s.antiSpam ? 'ON' : 'OFF'}**\nMots filtrés : **${s.blockedWords.length}**` }, { name: 'Protections', value: 'Spam, liens, pubs, insultes, mass-mentions, caps, emojis et ghost pings.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:automod`).setLabel('Configurer').setStyle(ButtonStyle.Danger), new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:words`).setLabel('Mots interdits').setStyle(ButtonStyle.Secondary))] }); }
+  if (page === 'giveaways') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [moduleEmbed('🎉 Giveaways', 'Crée un giveaway interactif dans le salon actuel.', [{ name: 'Actions', value: 'Créer, terminer et tirer un nouveau gagnant.' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:giveaway`).setLabel('Créer un giveaway').setStyle(ButtonStyle.Primary))] }); }
+  if (page === 'roles') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('🎭 Rôles', 'Autorôles et panneau de rôles libre-service.', [{ name: 'Autorôle', value: s.autoRoleId ? `<@&${s.autoRoleId}>` : 'Non configuré' }, { name: 'Rôles libre-service', value: String(s.selfRoleIds.length) }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:roles`).setLabel('Configurer les rôles').setStyle(ButtonStyle.Primary))] }); }
+  if (page === 'welcome') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const s = server(i.guild); return i.update({ embeds: [moduleEmbed('👋 Bienvenue', 'Messages d’arrivée et de départ personnalisés.', [{ name: 'État', value: s.welcome.enabled ? 'Activé' : 'Désactivé' }, { name: 'Variables', value: '`{user}`, `{server}`, `{memberCount}`' }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:welcome`).setLabel('Configurer').setStyle(ButtonStyle.Primary))] }); }
+  if (page === 'statistics') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); const totalMessages = [...stats.entries()].filter(([k]) => k.startsWith(`${i.guild.id}:`)).reduce((n, [, x]) => n + x.messages, 0); return i.update({ embeds: [moduleEmbed('📊 Statistiques du serveur', 'Vue globale de l’activité Helpy.', [{ name: 'Membres / Bots', value: `${i.guild.memberCount} / ${i.guild.members.cache.filter(m => m.user.bot).size}`, inline: true }, { name: 'Salons / Rôles', value: `${i.guild.channels.cache.size} / ${i.guild.roles.cache.size}`, inline: true }, { name: 'Messages enregistrés', value: String(totalMessages), inline: true }, { name: 'Boosts', value: `${i.guild.premiumSubscriptionCount || 0} · niveau ${i.guild.premiumTier}`, inline: true }])], components: [...nav(i, page), oneRow(new ButtonBuilder().setCustomId(`dash:${i.user.id}:setting:leaderboard`).setLabel('Classement XP').setStyle(ButtonStyle.Success))] }); }
   if (page === 'manage') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [managementEmbed(i.guild)], components: [...nav(i, page), ...managementRows(i)] }); }
   if (page === 'security') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
   if (page === 'engagement') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [engagementEmbed()], components: [...nav(i, 'manage'), ...engagementRows(i), back(i, 'manage')] }); }
@@ -289,14 +312,17 @@ async function settingAction(i, action) {
     { id: 'enabled', label: 'Activer ? (oui / non)', value: s.welcome.enabled ? 'oui' : 'non' }
   ]));
   if (action === 'logs') return i.showModal(modal(`dash:${i.user.id}:modal:logs:0`, 'Salon de logs', [{ id: 'channel', label: 'ID du salon (vide pour désactiver)', value: s.logsChannelId, required: false }]));
+  if (action === 'logevents') return i.showModal(modal(`dash:${i.user.id}:modal:logevents:0`, 'Catégories de logs', [{ id: 'events', label: 'Catégories séparées par ,', style: TextInputStyle.Paragraph, value: s.logEvents.join(', '), placeholder: 'messages, moderation, server, members' }]));
   if (action === 'security') return renderPage(i, 'security');
   if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
   if (action === 'toggleSpam') { s.antiSpam = !s.antiSpam; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
   if (action === 'words') return i.showModal(modal(`dash:${i.user.id}:modal:words:0`, 'Mots interdits', [{ id: 'words', label: 'Mots séparés par des virgules', style: TextInputStyle.Paragraph, value: s.blockedWords.join(', '), required: false }]));
+  if (action === 'automod') return i.showModal(modal(`dash:${i.user.id}:modal:automod:0`, 'Réglages AutoMod', [{ id: 'spam', label: 'Anti-spam (oui/non)', value: s.antiSpam ? 'oui' : 'non' }, { id: 'links', label: 'Anti-liens et pub (oui/non)', value: s.antiLinks ? 'oui' : 'non' }, { id: 'mentions', label: 'Anti mass-mentions (oui/non)', value: s.antiMentions ? 'oui' : 'non' }, { id: 'caps', label: 'Anti-caps (oui/non)', value: s.antiCaps ? 'oui' : 'non' }, { id: 'emoji', label: 'Anti emoji-spam (oui/non)', value: s.antiEmoji ? 'oui' : 'non' }]));
   if (action === 'roles') return i.showModal(modal(`dash:${i.user.id}:modal:roles:0`, 'Autorôles et rôles libre-service', [{ id: 'autorole', label: 'ID de l’autorôle (vide pour désactiver)', value: s.autoRoleId, required: false }, { id: 'selfroles', label: 'IDs des rôles libre-service (séparés par ,)', style: TextInputStyle.Paragraph, value: s.selfRoleIds.join(', '), required: false }]));
   if (action === 'voice') return i.showModal(modal(`dash:${i.user.id}:modal:voice:0`, 'Vocaux temporaires', [{ id: 'hub', label: 'ID du vocal « créer un salon »', value: s.tempVoiceHubId, required: false }, { id: 'category', label: 'ID de la catégorie (facultatif)', value: s.tempVoiceCategoryId, required: false }]));
   if (action === 'engagement') return renderPage(i, 'engagement');
   if (action === 'tickets') return i.showModal(modal(`dash:${i.user.id}:modal:tickets:0`, 'Panneau de tickets', [{ id: 'category', label: 'ID de la catégorie des tickets (facultatif)', value: s.ticketCategoryId, required: false }, { id: 'text', label: 'Texte du panneau', style: TextInputStyle.Paragraph, value: 'Besoin d’aide ? Ouvre un ticket privé avec l’équipe.' }]));
+  if (action === 'tickettools') { if (!i.channel?.topic?.startsWith('helpy-ticket:')) throw new Error('Ouvre cette page depuis un salon ticket Helpy.'); return i.reply({ content: 'Gestion du ticket :', components: [oneRow(new ButtonBuilder().setCustomId('helpy:ticketRename').setLabel('Renommer').setStyle(ButtonStyle.Secondary), new ButtonBuilder().setCustomId('helpy:ticketTranscript').setLabel('Transcription').setStyle(ButtonStyle.Primary), new ButtonBuilder().setCustomId('helpy:closeTicket').setLabel('Fermer').setStyle(ButtonStyle.Danger))], ephemeral: true }); }
   if (action === 'giveaway') return i.showModal(modal(`dash:${i.user.id}:modal:giveaway:0`, 'Créer un giveaway', [{ id: 'prize', label: 'Prix' }, { id: 'seconds', label: 'Durée en secondes (10 à 604800)', value: '3600' }]));
   if (action === 'poll') return i.showModal(modal(`dash:${i.user.id}:modal:poll:0`, 'Créer un sondage', [{ id: 'question', label: 'Question', style: TextInputStyle.Paragraph }, { id: 'options', label: 'Options, séparées par | (2 à 5)', placeholder: 'Option 1 | Option 2' }]));
   if (action === 'announcement') return i.showModal(modal(`dash:${i.user.id}:modal:announcement:0`, 'Publier une annonce', [{ id: 'title', label: 'Titre' }, { id: 'text', label: 'Contenu', style: TextInputStyle.Paragraph }]));
@@ -338,7 +364,7 @@ async function runAction(i, action, targetId) {
 }
 async function handleModal(i, action, targetId) {
   if (['say', 'update', 'banall'].includes(action)) return handleCreatorModal(i, action);
-  if (['welcome', 'logs', 'words', 'roles', 'voice', 'tickets', 'giveaway', 'poll', 'announcement'].includes(action)) return handleSettingModal(i, action);
+  if (['welcome', 'logs', 'logevents', 'words', 'automod', 'roles', 'voice', 'tickets', 'giveaway', 'poll', 'announcement'].includes(action)) return handleSettingModal(i, action);
   if (['nickname', 'voicemove'].includes(action)) return handleAdvancedModal(i, action, targetId);
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const reason = i.fields.fields.has('reason') ? i.fields.getTextInputValue('reason').trim() : '';
@@ -377,7 +403,9 @@ async function handleSettingModal(i, action) {
     return i.reply({ content: `${config.emojis.success} Messages d’accueil enregistrés.`, ephemeral: true });
   }
   if (action === 'logs') { const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.'); s.logsChannelId = channel; await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} Salon de logs ${channel ? 'enregistré' : 'désactivé'}.`, ephemeral: true }); }
+  if (action === 'logevents') { const allowed = ['messages', 'moderation', 'server', 'members']; s.logEvents = value('events').split(',').map(x => x.trim().toLowerCase()).filter(x => allowed.includes(x)); await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} Catégories de logs enregistrées.`, ephemeral: true }); }
   if (action === 'words') { s.blockedWords = value('words').split(',').map(x => x.trim()).filter(Boolean).slice(0, 50); await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} ${s.blockedWords.length} mot(s) interdit(s) enregistré(s).`, ephemeral: true }); }
+  if (action === 'automod') { const yes = id => ['oui', 'yes', 'on', 'true'].includes(value(id).toLowerCase()); s.antiSpam = yes('spam'); s.antiLinks = yes('links'); s.antiMentions = yes('mentions'); s.antiCaps = yes('caps'); s.antiEmoji = yes('emoji'); await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} AutoMod configuré.`, ephemeral: true }); }
   if (action === 'roles') {
     const auto = value('autorole'), self = value('selfroles').split(',').map(x => x.trim()).filter(Boolean).slice(0, 25);
     if ((auto && !i.guild.roles.cache.has(auto)) || self.some(id => !i.guild.roles.cache.has(id))) throw new Error('Un ID de rôle est invalide.');
