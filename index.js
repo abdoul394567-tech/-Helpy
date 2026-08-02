@@ -9,6 +9,30 @@ const config = require('./config');
 
 if (!process.env.DISCORD_TOKEN) throw new Error('DISCORD_TOKEN est absent. Ajoutez-le aux variables Railway ou dans .env local.');
 if (!/^\d+$/.test(config.creatorId)) console.warn('config.creatorId doit être remplacé par un ID Discord numérique.');
+const supabaseUrl = (process.env.SUPABASE_URL || '').replace(/\/$/, '');
+const supabaseKey = process.env.SUPABASE_SERVICE_ROLE_KEY || '';
+const databaseEnabled = Boolean(supabaseUrl && supabaseKey);
+if (!databaseEnabled) console.warn('Supabase non configuré : Helpy fonctionne en mode temporaire.');
+
+/** Stockage Supabase minimal : une table JSON, sans dépendance supplémentaire. */
+async function databaseRequest(path, options = {}) {
+  if (!databaseEnabled) return null;
+  const response = await fetch(`${supabaseUrl}/rest/v1/${path}`, {
+    ...options,
+    headers: { apikey: supabaseKey, Authorization: `Bearer ${supabaseKey}`, 'Content-Type': 'application/json', ...(options.headers || {}) }
+  });
+  if (!response.ok) throw new Error(`Supabase : ${response.status} ${await response.text()}`);
+  const body = await response.text();
+  return body ? JSON.parse(body) : null;
+}
+async function loadRecord(recordKey) {
+  try { const rows = await databaseRequest(`helpy_data?key=eq.${encodeURIComponent(recordKey)}&select=value`); return rows?.[0]?.value || null; }
+  catch (error) { console.error(`Lecture Supabase (${recordKey}) :`, error.message); return null; }
+}
+async function saveRecord(recordKey, value) {
+  try { await databaseRequest('helpy_data?on_conflict=key', { method: 'POST', headers: { Prefer: 'resolution=merge-duplicates,return=minimal' }, body: JSON.stringify({ key: recordKey, value }) }); }
+  catch (error) { console.error(`Sauvegarde Supabase (${recordKey}) :`, error.message); }
+}
 
 const client = new Client({
   intents: [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildPresences, GatewayIntentBits.GuildVoiceStates],
@@ -21,9 +45,10 @@ const settings = new Map(); // Configuration de session par serveur (remplacez p
 const recentMessages = new Map();
 const recentJoins = new Map();
 const giveaways = new Map();
+const voiceStarts = new Map();
 const color = config.color;
 const key = (g, u) => `${g}:${u}`;
-const data = (g, u) => { const k = key(g, u); if (!stats.has(k)) stats.set(k, { messages: 0, warns: [] }); return stats.get(k); };
+const data = (g, u) => { const k = key(g, u); if (!stats.has(k)) stats.set(k, { messages: 0, warns: [], reputation: 0, voiceSeconds: 0, joins: [] }); return stats.get(k); };
 const server = guild => {
   if (!settings.has(guild.id)) settings.set(guild.id, {
     welcome: { enabled: false, channelId: '', message: 'Bienvenue {user} sur **{server}** ! Tu es le membre #{memberCount}.', goodbye: 'Au revoir {user}.' },
@@ -32,6 +57,21 @@ const server = guild => {
   });
   return settings.get(guild.id);
 };
+async function loadServerState(guild) {
+  const saved = await loadRecord(`settings:${guild.id}`);
+  if (saved && typeof saved === 'object') settings.set(guild.id, { ...server(guild), ...saved, welcome: { ...server(guild).welcome, ...(saved.welcome || {}) } });
+}
+const saveServerState = guild => saveRecord(`settings:${guild.id}`, server(guild));
+async function loadMemberState(guildId, userId) {
+  const saved = await loadRecord(`member:${guildId}:${userId}`);
+  if (saved && typeof saved === 'object') stats.set(key(guildId, userId), { messages: 0, warns: [], reputation: 0, voiceSeconds: 0, joins: [], ...saved });
+}
+const saveMemberState = (guildId, userId) => saveRecord(`member:${guildId}:${userId}`, data(guildId, userId));
+const memberSaveTimers = new Map();
+function queueMemberSave(guildId, userId) {
+  const recordKey = key(guildId, userId); clearTimeout(memberSaveTimers.get(recordKey));
+  memberSaveTimers.set(recordKey, setTimeout(() => { memberSaveTimers.delete(recordKey); saveMemberState(guildId, userId); }, 15_000));
+}
 const isCreator = i => i.user.id === config.creatorId;
 const isAdmin = i => i.memberPermissions?.has(PermissionsBitField.Flags.Administrator);
 const canModerate = i => isAdmin(i) || isCreator(i);
@@ -76,11 +116,12 @@ function memberEmbed(guild, member) {
     .addFields(
       { name: 'Identité', value: `Pseudo : ${user.username}\nAffichage : ${member.displayName}\nID : \`${user.id}\``, inline: true },
       { name: 'Dates', value: `Compte : ${stamp(user.createdAt)}\nArrivée : ${member.joinedAt ? stamp(member.joinedAt) : 'Inconnue'}`, inline: true },
-      { name: 'Activité (session)', value: `Messages : ${s.messages}\nStatut : ${member.presence?.status || 'hors ligne'}\nActivité : ${truncate(activity, 90)}`, inline: true },
-      { name: 'Sanctions (session)', value: `Warns : ${s.warns.length}\nTotal : ${s.warns.length}${member.communicationDisabledUntilTimestamp > Date.now() ? '\nTimeout actif' : ''}`, inline: true },
+      { name: 'Activité', value: `Messages : ${s.messages}\nVocal : ${Math.floor(s.voiceSeconds / 60)} min\nNiveau XP : ${Math.floor(s.messages / 100) + 1}\nStatut : ${member.presence?.status || 'hors ligne'}`, inline: true },
+      { name: 'Sanctions / réputation', value: `Warns : ${s.warns.length}\nRéputation : ${s.reputation >= 0 ? '+' : ''}${s.reputation}\n${member.communicationDisabledUntilTimestamp > Date.now() ? 'Timeout actif' : 'Aucun timeout actif'}`, inline: true },
       { name: `Rôles (${Math.max(0, member.roles.cache.size - 1)})`, value: truncate(member.roles.cache.filter(r => r.id !== guild.id).map(r => r.toString()).join(' ') || 'Aucun', 1024) },
       { name: 'Permissions importantes', value: important.join(', ') || 'Aucune' }
-    ).setFooter({ text: 'Les statistiques marquées « session » sont réinitialisées au redémarrage.' }).setTimestamp();
+    ).addFields({ name: 'Historique récent', value: s.joins.slice(-4).map(x => `${x.type === 'join' ? '📥 Arrivée' : '📤 Départ'} ${stamp(new Date(x.at))}`).join('\n') || 'Aucun événement enregistré.' })
+    .setFooter({ text: databaseEnabled ? 'Données enregistrées dans Supabase.' : 'Mode temporaire : configurez Supabase pour conserver les données.' }).setTimestamp();
 }
 function targetMenu(interaction, action = 'profile') {
   const members = interaction.guild.members.cache.filter(m => !m.user.bot).first(25);
@@ -130,12 +171,14 @@ async function safeReply(interaction, payload) { return interaction.replied || i
 
 client.once('ready', async () => {
   console.log(`${config.botName} connecté en tant que ${client.user.tag}`);
+  await Promise.all(client.guilds.cache.map(guild => loadServerState(guild)));
   try { await client.application.commands.set([command]); console.log('Commande /dashboard enregistrée.'); } catch (e) { console.error('Impossible d’enregistrer la commande :', e.message); }
 });
 client.on('messageCreate', async message => {
   if (message.author.bot || !message.guild) return;
   const s = server(message.guild), memberData = data(message.guild.id, message.author.id);
   memberData.messages++;
+  queueMemberSave(message.guild.id, message.author.id);
   const now = Date.now(), messageKey = key(message.guild.id, message.author.id);
   const history = (recentMessages.get(messageKey) || []).filter(t => now - t < config.defaults.antiSpamWindowSeconds * 1000);
   history.push(now); recentMessages.set(messageKey, history);
@@ -149,6 +192,7 @@ client.on('messageCreate', async message => {
 client.on('guildMemberAdd', async member => {
   const s = server(member.guild), now = Date.now(), joins = (recentJoins.get(member.guild.id) || []).filter(t => now - t < config.defaults.antiRaidWindowSeconds * 1000);
   joins.push(now); recentJoins.set(member.guild.id, joins);
+  const memberData = data(member.guild.id, member.id); memberData.joins.push({ type: 'join', at: now }); queueMemberSave(member.guild.id, member.id);
   if (s.antiRaid && joins.length >= config.defaults.antiRaidJoins) {
     const everyone = member.guild.roles.everyone;
     for (const channel of member.guild.channels.cache.values()) if (channel.isTextBased()) await channel.permissionOverwrites.edit(everyone, { SendMessages: false }, 'Anti-raid Helpy').catch(() => {});
@@ -161,10 +205,20 @@ client.on('guildMemberAdd', async member => {
 });
 client.on('guildMemberRemove', async member => {
   const s = server(member.guild), channel = member.guild.channels.cache.get(s.welcome.channelId);
+  const memberData = data(member.guild.id, member.id); memberData.joins.push({ type: 'leave', at: Date.now() }); queueMemberSave(member.guild.id, member.id);
   if (s.welcome.enabled && channel?.isTextBased()) await channel.send({ content: formatTemplate(s.welcome.goodbye, member.guild, member), allowedMentions: { users: [member.id] } }).catch(() => {});
   await sendLog(member.guild, new EmbedBuilder().setTitle('📤 Départ').setDescription(`${member.user.tag} a quitté le serveur.`));
 });
 client.on('voiceStateUpdate', async (oldState, newState) => {
+  if (!newState.member.user.bot) {
+    const voiceKey = key(newState.guild.id, newState.member.id), now = Date.now();
+    if (!oldState.channelId && newState.channelId) voiceStarts.set(voiceKey, now);
+    if (oldState.channelId && (!newState.channelId || oldState.channelId !== newState.channelId)) {
+      const started = voiceStarts.get(voiceKey) || now;
+      const profile = data(newState.guild.id, newState.member.id); profile.voiceSeconds += Math.floor((now - started) / 1000); queueMemberSave(newState.guild.id, newState.member.id);
+      if (newState.channelId) voiceStarts.set(voiceKey, now); else voiceStarts.delete(voiceKey);
+    }
+  }
   const s = server(newState.guild);
   if (newState.channelId !== s.tempVoiceHubId) return;
   const category = s.tempVoiceCategoryId || newState.channel?.parentId;
@@ -175,6 +229,8 @@ client.on('interactionCreate', async interaction => {
   try {
     if (interaction.isChatInputCommand() && interaction.commandName === 'dashboard') {
       if (!interaction.inGuild()) return interaction.reply({ content: 'Cette commande est disponible uniquement sur un serveur.', ephemeral: true });
+      await loadServerState(interaction.guild);
+      await loadMemberState(interaction.guild.id, interaction.user.id);
       return interaction.reply({ embeds: [homeEmbed(interaction.guild, interaction)], components: nav(interaction), ephemeral: true });
     }
     if (interaction.customId?.startsWith('helpy:')) return handleHelpyInteraction(interaction);
@@ -200,7 +256,7 @@ client.on('interactionCreate', async interaction => {
 
 async function renderPage(i, page) {
   if (page === 'home') return i.update({ embeds: [homeEmbed(i.guild, i)], components: nav(i, page) });
-  if (page === 'profile') return i.update({ embeds: [memberEmbed(i.guild, i.member)], components: [...nav(i, page), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:members`).setLabel('Voir un autre profil').setStyle(ButtonStyle.Primary))] });
+  if (page === 'profile') { await loadMemberState(i.guild.id, i.user.id); return i.update({ embeds: [memberEmbed(i.guild, i.member)], components: [...nav(i, page), new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`dash:${i.user.id}:page:members`).setLabel('Voir un autre profil').setStyle(ButtonStyle.Primary))] }); }
   if (page === 'members') return i.update({ embeds: [new EmbedBuilder().setColor(color).setTitle('👥 Membres').setDescription('Sélectionnez un membre pour consulter son profil.')], components: [...nav(i, page), targetMenu(i, 'profile')] });
   if (page === 'mod') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [modEmbed()], components: [...nav(i, page), targetMenu(i, 'mod')] }); }
   if (page === 'manage') { if (!canModerate(i)) throw new Error('Permission Administrateur requise.'); return i.update({ embeds: [managementEmbed(i.guild)], components: [...nav(i, page), ...managementRows(i)] }); }
@@ -220,8 +276,8 @@ async function settingAction(i, action) {
   ]));
   if (action === 'logs') return i.showModal(modal(`dash:${i.user.id}:modal:logs:0`, 'Salon de logs', [{ id: 'channel', label: 'ID du salon (vide pour désactiver)', value: s.logsChannelId, required: false }]));
   if (action === 'security') return renderPage(i, 'security');
-  if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
-  if (action === 'toggleSpam') { s.antiSpam = !s.antiSpam; return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
+  if (action === 'toggleRaid') { s.antiRaid = !s.antiRaid; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
+  if (action === 'toggleSpam') { s.antiSpam = !s.antiSpam; await saveServerState(i.guild); return i.update({ embeds: [securityEmbed(i.guild)], components: [...nav(i, 'manage'), ...securityRows(i)] }); }
   if (action === 'words') return i.showModal(modal(`dash:${i.user.id}:modal:words:0`, 'Mots interdits', [{ id: 'words', label: 'Mots séparés par des virgules', style: TextInputStyle.Paragraph, value: s.blockedWords.join(', '), required: false }]));
   if (action === 'roles') return i.showModal(modal(`dash:${i.user.id}:modal:roles:0`, 'Autorôles et rôles libre-service', [{ id: 'autorole', label: 'ID de l’autorôle (vide pour désactiver)', value: s.autoRoleId, required: false }, { id: 'selfroles', label: 'IDs des rôles libre-service (séparés par ,)', style: TextInputStyle.Paragraph, value: s.selfRoleIds.join(', '), required: false }]));
   if (action === 'voice') return i.showModal(modal(`dash:${i.user.id}:modal:voice:0`, 'Vocaux temporaires', [{ id: 'hub', label: 'ID du vocal « créer un salon »', value: s.tempVoiceHubId, required: false }, { id: 'category', label: 'ID de la catégorie (facultatif)', value: s.tempVoiceCategoryId, required: false }]));
@@ -234,6 +290,7 @@ async function settingAction(i, action) {
 }
 async function showTarget(i, mode, id) {
   const m = await i.guild.members.fetch(id);
+  await loadMemberState(i.guild.id, m.id);
   if (mode === 'profile') return i.update({ embeds: [memberEmbed(i.guild, m)], components: [...nav(i, 'members'), back(i, 'members')] });
   if (!canModerate(i)) throw new Error('Permission Administrateur requise.');
   const actions = [['ban','Ban',ButtonStyle.Danger],['kick','Kick',ButtonStyle.Danger],['timeout','Timeout',ButtonStyle.Secondary],['unmute','Unmute',ButtonStyle.Secondary],['warn','Warn',ButtonStyle.Secondary],['unwarn','Unwarn',ButtonStyle.Secondary],['sanctions','Sanctions',ButtonStyle.Primary],['roles','Rôles',ButtonStyle.Primary]];
@@ -266,6 +323,7 @@ async function handleModal(i, action, targetId) {
   if (action === 'timeout') { const min = Number(i.fields.getTextInputValue('minutes')); if (!Number.isInteger(min) || min < 1 || min > 40320) throw new Error('Durée invalide (1 à 40320 minutes).'); await t.timeout(min * 60_000, `${reason} | Par ${i.user.tag}`); }
   if (action === 'warn') data(i.guild.id, t.id).warns.push({ reason, by: i.user.tag, at: Date.now() });
   if (action === 'unwarn') { const w = data(i.guild.id, t.id).warns; if (!w.length) throw new Error('Aucun warn à retirer.'); w.pop(); }
+  await saveMemberState(i.guild.id, t.id);
   await sendLog(i.guild, new EmbedBuilder().setTitle(`🛡️ ${action.toUpperCase()}`).setDescription(`Cible : ${t.user.tag}\nModérateur : ${i.user.tag}\nRaison : ${reason || 'Non précisée'}`));
   return i.reply({ content: `${config.emojis.success} Action **${action}** appliquée à ${t.user.tag}.`, ephemeral: true });
 }
@@ -276,19 +334,20 @@ async function handleSettingModal(i, action) {
   if (action === 'welcome') {
     const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.');
     s.welcome = { enabled: ['oui', 'yes', 'on', 'true'].includes(value('enabled').toLowerCase()), channelId: channel, message: value('welcome'), goodbye: value('goodbye') };
+    await saveServerState(i.guild);
     return i.reply({ content: `${config.emojis.success} Messages d’accueil enregistrés.`, ephemeral: true });
   }
-  if (action === 'logs') { const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.'); s.logsChannelId = channel; return i.reply({ content: `${config.emojis.success} Salon de logs ${channel ? 'enregistré' : 'désactivé'}.`, ephemeral: true }); }
-  if (action === 'words') { s.blockedWords = value('words').split(',').map(x => x.trim()).filter(Boolean).slice(0, 50); return i.reply({ content: `${config.emojis.success} ${s.blockedWords.length} mot(s) interdit(s) enregistré(s).`, ephemeral: true }); }
+  if (action === 'logs') { const channel = value('channel'); if (!validChannel(channel) || (channel && !i.guild.channels.cache.get(channel).isTextBased())) throw new Error('ID de salon texte invalide.'); s.logsChannelId = channel; await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} Salon de logs ${channel ? 'enregistré' : 'désactivé'}.`, ephemeral: true }); }
+  if (action === 'words') { s.blockedWords = value('words').split(',').map(x => x.trim()).filter(Boolean).slice(0, 50); await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} ${s.blockedWords.length} mot(s) interdit(s) enregistré(s).`, ephemeral: true }); }
   if (action === 'roles') {
     const auto = value('autorole'), self = value('selfroles').split(',').map(x => x.trim()).filter(Boolean).slice(0, 25);
     if ((auto && !i.guild.roles.cache.has(auto)) || self.some(id => !i.guild.roles.cache.has(id))) throw new Error('Un ID de rôle est invalide.');
-    s.autoRoleId = auto; s.selfRoleIds = self;
+    s.autoRoleId = auto; s.selfRoleIds = self; await saveServerState(i.guild);
     if (self.length && i.channel?.isTextBased()) await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎭 Rôles').setDescription('Choisissez vos rôles ci-dessous.')], components: [new ActionRowBuilder().addComponents(new StringSelectMenuBuilder().setCustomId(`helpy:selfroles:${i.guild.id}`).setPlaceholder('Ajouter ou retirer un rôle').setMinValues(0).setMaxValues(Math.min(self.length, 25)).addOptions(self.map(id => ({ label: i.guild.roles.cache.get(id).name, value: id }))))] });
     return i.reply({ content: `${config.emojis.success} Rôles configurés${self.length ? ' et panneau publié' : ''}.`, ephemeral: true });
   }
-  if (action === 'voice') { const hub = value('hub'), category = value('category'); if ((hub && i.guild.channels.cache.get(hub)?.type !== ChannelType.GuildVoice) || (category && i.guild.channels.cache.get(category)?.type !== ChannelType.GuildCategory)) throw new Error('IDs de vocal ou catégorie invalides.'); s.tempVoiceHubId = hub; s.tempVoiceCategoryId = category; return i.reply({ content: `${config.emojis.success} Vocaux temporaires configurés.`, ephemeral: true }); }
-  if (action === 'tickets') { const category = value('category'); if (category && i.guild.channels.cache.get(category)?.type !== ChannelType.GuildCategory) throw new Error('ID de catégorie invalide.'); s.ticketCategoryId = category; await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎫 Support Helpy').setDescription(value('text'))], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`helpy:ticket:${i.guild.id}`).setLabel('Ouvrir un ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary))] }); return i.reply({ content: `${config.emojis.success} Panneau de tickets publié.`, ephemeral: true }); }
+  if (action === 'voice') { const hub = value('hub'), category = value('category'); if ((hub && i.guild.channels.cache.get(hub)?.type !== ChannelType.GuildVoice) || (category && i.guild.channels.cache.get(category)?.type !== ChannelType.GuildCategory)) throw new Error('IDs de vocal ou catégorie invalides.'); s.tempVoiceHubId = hub; s.tempVoiceCategoryId = category; await saveServerState(i.guild); return i.reply({ content: `${config.emojis.success} Vocaux temporaires configurés.`, ephemeral: true }); }
+  if (action === 'tickets') { const category = value('category'); if (category && i.guild.channels.cache.get(category)?.type !== ChannelType.GuildCategory) throw new Error('ID de catégorie invalide.'); s.ticketCategoryId = category; await saveServerState(i.guild); await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎫 Support Helpy').setDescription(value('text'))], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`helpy:ticket:${i.guild.id}`).setLabel('Ouvrir un ticket').setEmoji('🎫').setStyle(ButtonStyle.Primary))] }); return i.reply({ content: `${config.emojis.success} Panneau de tickets publié.`, ephemeral: true }); }
   if (action === 'giveaway') {
     const seconds = Number(value('seconds')); if (!Number.isInteger(seconds) || seconds < 10 || seconds > 604800) throw new Error('Durée invalide (10 à 604800 secondes).');
     const msg = await i.channel.send({ embeds: [new EmbedBuilder().setColor(color).setTitle('🎉 GIVEAWAY').setDescription(`Prix : **${value('prize')}**\nSe termine <t:${Math.floor((Date.now() + seconds * 1000) / 1000)}:R>\nClique pour participer.`)], components: [new ActionRowBuilder().addComponents(new ButtonBuilder().setCustomId(`helpy:giveaway:${i.guild.id}`).setLabel('Participer').setEmoji('🎉').setStyle(ButtonStyle.Success))] });
