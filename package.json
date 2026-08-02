@@ -1,6 +1,6 @@
 {
-  "name": "Helpy",
-  "version": "1.0.0",
+  "name": "corex-dashboard-bot",
+  "version": "1.0.1",
   "private": true,
   "description": "Bot Discord Corex avec dashboard interactif",
   "main": "index.js",
